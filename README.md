@@ -5,15 +5,17 @@
 > Capture the answer. Keep every link.
 
 AnswerFrame is a private, screenshot-first library for good AI answers. v1
-captures one ChatGPT assistant answer, keeps the preceding user question as
+captures one ChatGPT or Gemini web answer, keeps the preceding user question as
 editable text, extracts source links, and shows those links in a position-aware
-Source Rail beside the original screenshot.
+Source Rail beside the original screenshot. On Gemini, the adapter also reads
+the visible **Sources** panel temporarily and closes it again before the capture
+flow finishes.
 
 ## Repository layout
 
 ```text
 apps/web          React + Vite cloud-library UI (Demo mode when Firebase is absent)
-apps/extension    Manifest V3 ChatGPT capture client
+apps/extension    Manifest V3 ChatGPT + Gemini capture client
 packages/shared   CaptureDraft/ClipRecord types and link/rail utilities
 functions         Firebase Functions 2nd gen validator and cleanup triggers
 firestore.rules   UID + answerframeOwner protected clip records
@@ -33,8 +35,8 @@ npm run dev
 ```
 
 Open `http://localhost:5173/library`. With no `.env` values the app is an
-intentional local Demo mode backed by browser `localStorage`; it is safe to use
-for visual and interaction work.
+intentional local Demo mode backed by browser IndexedDB (including long
+screenshots); it is safe to use for visual and interaction work.
 
 ### Daily use without two terminals
 
@@ -50,10 +52,11 @@ npm run install:startup
 ```
 
 This starts the local AnswerFrame server silently at Windows sign-in and opens
-the library. To disable it, delete `AnswerFrame.lnk` from the current user's
-Startup folder. When web source files change, run `npm run build:web`; when
-extension files change, run `npm run build:extension` and click Reload on the
-extension card.
+the library. When web source files change, run `npm run build:web`; when
+extension files change, run `npm run build:extension`, click Reload on the
+extension card, and refresh already-open ChatGPT/Gemini tabs once. To disable
+the startup helper, delete `AnswerFrame.lnk` from the current user's Startup
+folder.
 
 ## Firebase development project
 
@@ -107,19 +110,24 @@ npm run build:extension
 In Chrome, open `chrome://extensions`, enable Developer mode, and choose
 **Load unpacked** → `apps/extension/dist`. The daily-start helper keeps the
 local web app available at `http://localhost:5173`; no terminal needs to remain
-open. The extension declares only ChatGPT (plus the local development bridge),
-`storage`, `offscreen`, and temporary `activeTab` capture access; it does not
-ask for all-site access, cookies, history, or debugger access.
+open. If the extension was just reloaded, refresh each already-open AI tab once.
+The extension declares only ChatGPT and Gemini web pages (plus the local
+development bridge), `storage`, `offscreen`, and temporary `activeTab` capture
+access; it does not ask for all-site access, cookies, history, or debugger
+access.
 
-On a ChatGPT page, each detected assistant answer receives **Save to
-AnswerFrame**. The capture flow temporarily hides controls, captures visible
-segments at least 550 ms apart, crops and stitches them, restores scroll and
-focus in `finally`, then opens an in-page preview. Only after confirmation does
-the extension open the library and forward the draft.
+On a ChatGPT or Gemini page, each detected assistant/model answer receives
+**Save to AnswerFrame**. The capture flow temporarily hides controls, captures
+visible segments at least 550 ms apart, crops and stitches them, restores scroll
+and focus in `finally`, then opens an in-page preview. Only after confirmation
+does the extension open the library and forward the draft. Gemini source links
+found in the answer and in its Sources panel are merged and de-duplicated while
+retaining a `sourceSurface` marker.
 
 ## Deliberate v1 boundaries
 
-- ChatGPT only; Claude/Gemini adapters are not included yet.
+- ChatGPT and Gemini web pages only; Claude, Gemini in Chrome's side panel, and
+  mobile apps are not included.
 - Private account library; no public sharing, teams, OCR, AI summaries, or
   image annotation.
 - No video or paper-body downloads. The screenshot and source metadata are the

@@ -19,7 +19,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 });
 
 async function captureVisible(windowId?: number): Promise<{ dataUrl?: string; error?: string }> {
-  if (typeof windowId !== "number") return { error: "没有找到当前 ChatGPT 标签页" };
+  if (typeof windowId !== "number") return { error: "没有找到当前 AI 标签页" };
   const wait = Math.max(0, 550 - (Date.now() - lastCaptureAt));
   if (wait) await new Promise((resolve) => setTimeout(resolve, wait));
   try {
@@ -35,35 +35,31 @@ async function openLibraryWithDraft(draft: unknown): Promise<void> {
   const tab = await chrome.tabs.create({ url: `${APP_URL}/import?from=extension` });
   if (typeof tab.id !== "number") throw new Error("无法打开 AnswerFrame 网页");
   pendingForward.set(tab.id, draft);
-  const listener = (updatedTabId: number, changeInfo: chrome.tabs.TabChangeInfo) => {
-    if (updatedTabId !== tab.id || changeInfo.status !== "complete") return;
-    void forwardDraft(tab.id!, listener);
-  };
-  chrome.tabs.onUpdated.addListener(listener);
-  // A cached page can finish before onUpdated is attached; retrying also gives
-  // the bridge content script time to register its message listener.
-  setTimeout(() => void forwardDraft(tab.id!, listener), 1_000);
+  const delivered = await forwardDraft(tab.id);
+  if (!delivered) throw new Error("AnswerFrame 网页未确认收到草稿，请确认 localhost:5173 正在运行后重试");
 }
 
-async function forwardDraft(tabId: number, listener: (tabId: number, changeInfo: chrome.tabs.TabChangeInfo) => void): Promise<void> {
+async function forwardDraft(tabId: number): Promise<boolean> {
   const value = pendingForward.get(tabId);
-  if (value === undefined) return;
+  if (value === undefined) return false;
   for (let attempt = 0; attempt < 8; attempt += 1) {
     try {
-      await chrome.tabs.sendMessage(tabId, { type: "answerframe:forward-draft", draft: value });
+      const response = await chrome.tabs.sendMessage(tabId, { type: "answerframe:forward-draft", draft: value }) as { ok?: boolean; error?: string } | undefined;
+      if (!response?.ok) throw new Error(response?.error || "AnswerFrame 网页尚未确认草稿");
       pendingForward.delete(tabId);
-      chrome.tabs.onUpdated.removeListener(listener);
-      return;
+      return true;
     } catch {
       await new Promise((resolve) => setTimeout(resolve, 500));
     }
   }
+  pendingForward.delete(tabId);
+  return false;
 }
 
 async function ensureOffscreen(): Promise<void> {
   const contexts = await chrome.runtime.getContexts({ contextTypes: [chrome.runtime.ContextType.OFFSCREEN_DOCUMENT] }) as unknown as chrome.runtime.ExtensionContext[];
   if (contexts.length) return;
-  await chrome.offscreen.createDocument({ url: "offscreen.html", reasons: ["DOM_SCRAPING"], justification: "Run the Firebase Google OAuth helper without injecting auth UI into ChatGPT." });
+  await chrome.offscreen.createDocument({ url: "offscreen.html", reasons: ["DOM_SCRAPING"], justification: "Run the Firebase Google OAuth helper without injecting auth UI into an AI chat page." });
 }
 
 async function authenticateWithOffscreen(): Promise<unknown> {

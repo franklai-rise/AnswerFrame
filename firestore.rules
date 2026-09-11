@@ -18,7 +18,7 @@ service cloud.firestore {
         'deletedAt', 'schemaVersion'
       ])
       && data.ownerUid is string
-      && data.platform == 'chatgpt'
+      && data.platform in ['chatgpt', 'gemini']
       && data.theme in ['light', 'dark']
       && data.title is string
       && data.question is string

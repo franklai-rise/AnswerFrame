@@ -19,7 +19,7 @@
     "build:shared": "npm --workspace packages/shared run build",
     "build:web": "npm run build:shared && npm --workspace apps/web run build",
     "build:extension": "npm run build:shared && npm --workspace apps/extension run build",
-    "test": "npm --workspace packages/shared run test && npm --workspace apps/web run test",
+    "test": "npm --workspace packages/shared run test && npm --workspace apps/web run test && npm --workspace apps/extension run test",
     "test:shared": "npm --workspace packages/shared run test",
     "test:web": "npm --workspace apps/web run test",
     "test:functions": "npm --workspace packages/shared run build && npm --workspace functions run build",

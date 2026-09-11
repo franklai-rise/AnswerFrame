@@ -39,6 +39,7 @@ import {
   type ClipRecord,
   type LinkKind,
   type LinkStatus,
+  type Platform,
   type RailItem,
   type ScreenshotPart,
 } from "@answerframe/shared";
@@ -85,6 +86,10 @@ function kindLabel(kind: LinkKind): string {
   return { youtube: "YouTube", doi: "DOI", pdf: "PDF", journal: "文献", general: "网页" }[kind];
 }
 
+function platformLabel(platform: Platform): string {
+  return platform === "gemini" ? "Gemini" : "ChatGPT";
+}
+
 function statusTone(status: LinkStatus): string {
   return `status-${status}`;
 }
@@ -99,6 +104,7 @@ function App() {
   const [selectedId, setSelectedId] = useState(() => window.location.pathname.split("/").pop() || "");
   const [viewMode, setViewMode] = useState<ViewMode>("grid");
   const [query, setQuery] = useState("");
+  const [platformFilter, setPlatformFilter] = useState<Platform | "all">("all");
   const [tagFilter, setTagFilter] = useState("all");
   const [kindFilter, setKindFilter] = useState("all");
   const [toast, setToast] = useState<string | null>(null);
@@ -147,7 +153,10 @@ function App() {
     const onMessage = (event: MessageEvent) => {
       if (event.source !== window || event.data?.type !== "answerframe:draft") return;
       const draft = event.data.draft as CaptureDraft & { _metadata?: { title?: string; note?: string; tags?: string[] } };
-      if (draft?.platform === "chatgpt" && Array.isArray(draft.screenshotParts)) setImportDraft(draft);
+      if ((draft?.platform === "chatgpt" || draft?.platform === "gemini") && Array.isArray(draft.screenshotParts)) {
+        setImportDraft(draft);
+        if (event.data?.requestId) window.postMessage({ type: "answerframe:draft-ack", requestId: event.data.requestId }, "*");
+      }
     };
     window.addEventListener("message", onMessage);
     return () => window.removeEventListener("message", onMessage);
@@ -156,13 +165,14 @@ function App() {
   const selectedClip = clips.find((clip) => clip.id === selectedId) || trash.find((clip) => clip.id === selectedId) || null;
   const allTags = useMemo(() => Array.from(new Set(clips.flatMap((clip) => clip.tags))).sort(), [clips]);
   const allKinds = useMemo(() => Array.from(new Set(clips.flatMap((clip) => clip.links.map((link) => link.kind)))).sort(), [clips]);
+  const allPlatforms = useMemo(() => Array.from(new Set(clips.map((clip) => clip.platform))).sort(), [clips]);
   const filteredClips = useMemo(() => {
     const needle = query.trim().toLowerCase();
     return clips.filter((clip) => {
       const haystack = [clip.title, clip.question, clip.answerText, clip.note, clip.tags.join(" "), ...clip.links.map((link) => `${link.label} ${link.url}`)].join(" ").toLowerCase();
-      return (!needle || haystack.includes(needle)) && (tagFilter === "all" || clip.tags.includes(tagFilter)) && (kindFilter === "all" || clip.links.some((link) => link.kind === kindFilter));
+      return (!needle || haystack.includes(needle)) && (platformFilter === "all" || clip.platform === platformFilter) && (tagFilter === "all" || clip.tags.includes(tagFilter)) && (kindFilter === "all" || clip.links.some((link) => link.kind === kindFilter));
     });
-  }, [clips, query, tagFilter, kindFilter]);
+  }, [clips, query, platformFilter, tagFilter, kindFilter]);
 
   const saveDraft = async (draft: CaptureDraft, metadata: { title?: string; note?: string; tags?: string[] }) => {
     try {
@@ -245,9 +255,9 @@ function App() {
             {user ? <button className="account-button" onClick={() => void signOutAnswerFrame()} title="退出登录"><span className="avatar">{(user.displayName || user.email || "A").slice(0, 1).toUpperCase()}</span><span className="account-name">{user.displayName || user.email}</span><LogOut size={15} /></button> : <button className="button button-quiet" onClick={() => void signIn()}><LogIn size={16} />Google 登录</button>}
           </div>
         </header>
-        {!firebaseEnabled && <div className="demo-banner"><Sparkles size={16} />这是可安全试用的本地 Demo；填入 <code>VITE_FIREBASE_*</code> 后，确认保存会上传到你的私有 Firebase 项目。</div>}
+        {!firebaseEnabled && <div className="demo-banner"><Sparkles size={16} />这是可安全试用的本地 Demo；截图保存在当前浏览器的 IndexedDB 中。填入 <code>VITE_FIREBASE_*</code> 后，确认保存会上传到你的私有 Firebase 项目。</div>}
         <main className="content-area">
-          {route === "library" && <LibraryPage clips={filteredClips} allTags={allTags} allKinds={allKinds} tagFilter={tagFilter} kindFilter={kindFilter} setTagFilter={setTagFilter} setKindFilter={setKindFilter} viewMode={viewMode} setViewMode={setViewMode} onOpen={(id) => { setSelectedId(id); navigate(`/clip/${id}`); }} />}
+          {route === "library" && <LibraryPage clips={filteredClips} allPlatforms={allPlatforms} platformFilter={platformFilter} setPlatformFilter={setPlatformFilter} allTags={allTags} allKinds={allKinds} tagFilter={tagFilter} kindFilter={kindFilter} setTagFilter={setTagFilter} setKindFilter={setKindFilter} viewMode={viewMode} setViewMode={setViewMode} onOpen={(id) => { setSelectedId(id); navigate(`/clip/${id}`); }} />}
           {route === "detail" && selectedClip && <DetailPage clip={selectedClip} repo={repo} onBack={() => navigate("/library")} onUpdate={updateClip} onDelete={() => void deleteClip(selectedClip.id)} onRecheck={() => void recheckLinks(selectedClip.id)} onNotify={notify} />}
           {route === "detail" && !selectedClip && <EmptyState icon={<CircleHelp />} title="找不到这条收藏" actionLabel="回到收藏库" onAction={() => navigate("/library")} />}
           {route === "trash" && <TrashPage clips={trash} onRestore={(id) => void restoreClip(id)} onPurge={(id) => void deleteClip(id, true)} />}
@@ -273,7 +283,7 @@ function Sidebar({ route, mobileMenu, onNavigate, onClose }: { route: Route; mob
       <NavButton active={route === "settings"} icon={<Settings size={17} />} label="设置" onClick={() => onNavigate("settings")} />
       <NavButton active={false} icon={<CircleHelp size={17} />} label="使用说明" onClick={() => window.open("https://github.com/", "_blank", "noopener,noreferrer")} />
     </nav>
-    <div className="sidebar-bottom"><div className="privacy-note"><ShieldCheck size={16} /><span><strong>Private by default</strong><br />你的回答只属于你的账号</span></div><div className="version-label">AnswerFrame v0.1 · Capture the answer.</div></div>
+    <div className="sidebar-bottom"><div className="privacy-note"><ShieldCheck size={16} /><span><strong>Private by default</strong><br />你的回答只属于你的账号</span></div><div className="version-label">AnswerFrame v0.2 · Capture the answer.</div></div>
   </aside>;
 }
 
@@ -281,18 +291,18 @@ function NavButton({ active, icon, label, count, onClick }: { active: boolean; i
   return <button className={`nav-button ${active ? "active" : ""}`} onClick={onClick}>{icon}<span>{label}</span>{typeof count === "number" && <span className="nav-count">{count}</span>}</button>;
 }
 
-function LibraryPage({ clips, allTags, allKinds, tagFilter, kindFilter, setTagFilter, setKindFilter, viewMode, setViewMode, onOpen }: { clips: ClipRecord[]; allTags: string[]; allKinds: LinkKind[]; tagFilter: string; kindFilter: string; setTagFilter: (value: string) => void; setKindFilter: (value: string) => void; viewMode: ViewMode; setViewMode: (value: ViewMode) => void; onOpen: (id: string) => void }) {
+function LibraryPage({ clips, allPlatforms, platformFilter, setPlatformFilter, allTags, allKinds, tagFilter, kindFilter, setTagFilter, setKindFilter, viewMode, setViewMode, onOpen }: { clips: ClipRecord[]; allPlatforms: Platform[]; platformFilter: Platform | "all"; setPlatformFilter: (value: Platform | "all") => void; allTags: string[]; allKinds: LinkKind[]; tagFilter: string; kindFilter: string; setTagFilter: (value: string) => void; setKindFilter: (value: string) => void; viewMode: ViewMode; setViewMode: (value: ViewMode) => void; onOpen: (id: string) => void }) {
   return <>
     <div className="page-heading"><div><div className="eyebrow">YOUR COLLECTION</div><h1>收藏库</h1><p>把值得再次阅读的 AI 回答，连同它的上下文和来源放在一起。</p></div><button className="button button-primary" onClick={() => window.open("http://localhost:5173/import", "_blank")}><Plus size={17} />从扩展导入</button></div>
-    <div className="toolbar"><div className="filter-group"><div className="filter-control"><Filter size={15} /><select aria-label="标签筛选" value={tagFilter} onChange={(event) => setTagFilter(event.target.value)}><option value="all">所有标签</option>{allTags.map((tag) => <option key={tag} value={tag}>{tag}</option>)}</select></div><div className="filter-control"><Link2 size={15} /><select aria-label="链接类型筛选" value={kindFilter} onChange={(event) => setKindFilter(event.target.value)}><option value="all">所有来源</option>{allKinds.map((kind) => <option key={kind} value={kind}>{kindLabel(kind)}</option>)}</select></div></div><div className="view-switcher"><button className={viewMode === "grid" ? "selected" : ""} onClick={() => setViewMode("grid")} aria-label="卡片网格"><Grid2X2 size={17} /></button><button className={viewMode === "list" ? "selected" : ""} onClick={() => setViewMode("list")} aria-label="紧凑列表"><List size={18} /></button></div></div>
-    {clips.length === 0 ? <EmptyState icon={<Archive />} title="还没有匹配的收藏" description="试试清空搜索，或在 ChatGPT 回答下方点击 Save to AnswerFrame。" /> : viewMode === "grid" ? <div className="clip-grid">{clips.map((clip) => <ClipCard key={clip.id} clip={clip} onOpen={onOpen} />)}</div> : <div className="clip-list">{clips.map((clip) => <ClipListRow key={clip.id} clip={clip} onOpen={onOpen} />)}</div>}
+    <div className="toolbar"><div className="filter-group"><div className="filter-control"><Sparkles size={15} /><select aria-label="平台筛选" value={platformFilter} onChange={(event) => setPlatformFilter(event.target.value as Platform | "all")}><option value="all">所有平台</option>{allPlatforms.map((platform) => <option key={platform} value={platform}>{platformLabel(platform)}</option>)}</select></div><div className="filter-control"><Filter size={15} /><select aria-label="标签筛选" value={tagFilter} onChange={(event) => setTagFilter(event.target.value)}><option value="all">所有标签</option>{allTags.map((tag) => <option key={tag} value={tag}>{tag}</option>)}</select></div><div className="filter-control"><Link2 size={15} /><select aria-label="链接类型筛选" value={kindFilter} onChange={(event) => setKindFilter(event.target.value)}><option value="all">所有来源</option>{allKinds.map((kind) => <option key={kind} value={kind}>{kindLabel(kind)}</option>)}</select></div></div><div className="view-switcher"><button className={viewMode === "grid" ? "selected" : ""} onClick={() => setViewMode("grid")} aria-label="卡片网格"><Grid2X2 size={17} /></button><button className={viewMode === "list" ? "selected" : ""} onClick={() => setViewMode("list")} aria-label="紧凑列表"><List size={18} /></button></div></div>
+    {clips.length === 0 ? <EmptyState icon={<Archive />} title="还没有匹配的收藏" description="试试清空搜索和筛选，或在 ChatGPT / Gemini 回答下方点击 Save to AnswerFrame。" /> : viewMode === "grid" ? <div className="clip-grid">{clips.map((clip) => <ClipCard key={clip.id} clip={clip} onOpen={onOpen} />)}</div> : <div className="clip-list">{clips.map((clip) => <ClipListRow key={clip.id} clip={clip} onOpen={onOpen} />)}</div>}
   </>;
 }
 
 function ClipCard({ clip, onOpen }: { clip: ClipRecord; onOpen: (id: string) => void }) {
   return <article className="clip-card" onClick={() => onOpen(clip.id)} tabIndex={0} onKeyDown={(event) => { if (event.key === "Enter") onOpen(clip.id); }}>
     <div className="clip-card-image"><ResolvedImage path={clip.thumbnailPath || clip.imageParts[0]?.path} alt="收藏截图预览" /><div className="image-overlay"><span><Link2 size={13} />{clip.links.length} 个来源</span><span>{clip.theme === "dark" ? "Dark" : "Light"}</span></div></div>
-    <div className="clip-card-body"><div className="clip-card-meta"><span>{formatDate(clip.createdAt)}</span><span className="platform-dot"><span />ChatGPT</span></div><h2>{clip.title}</h2><p>{clip.question}</p><div className="tag-row">{clip.tags.slice(0, 3).map((tag) => <span className="tag-chip" key={tag}><Tag size={11} />{tag}</span>)}</div></div><div className="clip-card-arrow"><ChevronRight size={17} /></div>
+    <div className="clip-card-body"><div className="clip-card-meta"><span>{formatDate(clip.createdAt)}</span><span className={`platform-dot ${clip.platform}`}><span />{platformLabel(clip.platform)}</span></div><h2>{clip.title}</h2><p>{clip.question}</p><div className="tag-row">{clip.tags.slice(0, 3).map((tag) => <span className="tag-chip" key={tag}><Tag size={11} />{tag}</span>)}</div></div><div className="clip-card-arrow"><ChevronRight size={17} /></div>
   </article>;
 }
 
@@ -302,7 +312,7 @@ function ClipListRow({ clip, onOpen }: { clip: ClipRecord; onOpen: (id: string) 
 
 function DetailPage({ clip, repo, onBack, onUpdate, onDelete, onRecheck, onNotify }: { clip: ClipRecord; repo: ClipRepository; onBack: () => void; onUpdate: (id: string, patch: ClipPatch) => Promise<void>; onDelete: () => void; onRecheck: () => void; onNotify: (message: string) => void }) {
   const [editing, setEditing] = useState(false);
-  return <div className="detail-page"><button className="back-button" onClick={onBack}><ArrowLeft size={16} />返回收藏库</button><div className="detail-header"><div><div className="eyebrow">SAVED ANSWER · {formatDate(clip.createdAt)}</div><h1>{clip.title}</h1><div className="detail-byline"><span className="platform-dot"><span />ChatGPT</span><a href={clip.conversationUrl} target="_blank" rel="noreferrer">打开原对话 <ExternalLink size={13} /></a></div></div><div className="detail-actions"><button className="button button-quiet" onClick={() => setEditing((value) => !value)}>{editing ? <X size={16} /> : <FileText size={16} />}{editing ? "关闭编辑" : "编辑"}</button>{!editing && <button className="button button-quiet" onClick={onRecheck}><RotateCcw size={15} />Recheck links</button>}<button className="icon-button" aria-label="更多操作"><MoreHorizontal size={18} /></button></div></div>{editing ? <ClipEditor clip={clip} repo={repo} onSave={async (patch) => { await onUpdate(clip.id, patch); setEditing(false); }} onNotify={onNotify} /> : <div className="detail-content"><section className="question-box"><div className="section-kicker">USER QUESTION</div><p>{clip.question}</p></section><div className="detail-stats"><span><Link2 size={15} />{clip.links.length} 个来源</span><span><Tag size={15} />{clip.tags.length} 个标签</span><span className={`theme-badge ${clip.theme}`} />{clip.theme === "dark" ? "深色主题" : "浅色主题"}</div><VisualSourceRail clip={clip} /><section className="answer-text"><div className="section-kicker">ANSWER TEXT</div><p>{clip.answerText}</p></section>{clip.note && <section className="note-box"><div className="section-kicker">NOTE</div><p>{clip.note}</p></section>}<div className="detail-footer"><span>最后更新 {formatDate(clip.updatedAt)}</span><button className="danger-button" onClick={onDelete}><Trash2 size={15} />移入回收站</button></div></div>}</div>;
+  return <div className="detail-page"><button className="back-button" onClick={onBack}><ArrowLeft size={16} />返回收藏库</button><div className="detail-header"><div><div className="eyebrow">SAVED ANSWER · {formatDate(clip.createdAt)}</div><h1>{clip.title}</h1><div className="detail-byline"><span className={`platform-dot ${clip.platform}`}><span />{platformLabel(clip.platform)}</span><a href={clip.conversationUrl} target="_blank" rel="noreferrer">打开原对话 <ExternalLink size={13} /></a></div></div><div className="detail-actions"><button className="button button-quiet" onClick={() => setEditing((value) => !value)}>{editing ? <X size={16} /> : <FileText size={16} />}{editing ? "关闭编辑" : "编辑"}</button>{!editing && <button className="button button-quiet" onClick={onRecheck}><RotateCcw size={15} />Recheck links</button>}<button className="icon-button" aria-label="更多操作"><MoreHorizontal size={18} /></button></div></div>{editing ? <ClipEditor clip={clip} repo={repo} onSave={async (patch) => { await onUpdate(clip.id, patch); setEditing(false); }} onNotify={onNotify} /> : <div className="detail-content"><section className="question-box"><div className="section-kicker">USER QUESTION</div><p>{clip.question}</p></section><div className="detail-stats"><span><Link2 size={15} />{clip.links.length} 个来源</span><span><Tag size={15} />{clip.tags.length} 个标签</span><span className={`theme-badge ${clip.theme}`} />{clip.theme === "dark" ? "深色主题" : "浅色主题"}</div><VisualSourceRail clip={clip} /><section className="answer-text"><div className="section-kicker">ANSWER TEXT</div><p>{clip.answerText}</p></section>{clip.note && <section className="note-box"><div className="section-kicker">NOTE</div><p>{clip.note}</p></section>}<div className="detail-footer"><span>最后更新 {formatDate(clip.updatedAt)}</span><button className="danger-button" onClick={onDelete}><Trash2 size={15} />移入回收站</button></div></div>}</div>;
 }
 
 function VisualSourceRail({ clip }: { clip: ClipRecord }) {
@@ -376,7 +386,7 @@ function TrashPage({ clips, onRestore, onPurge }: { clips: ClipRecord[]; onResto
 }
 
 function SettingsPage({ user, ownerAllowed, firebaseReady, onSignIn }: { user: User | null; ownerAllowed: boolean; firebaseReady: boolean; onSignIn: () => void }) {
-  return <><div className="page-heading"><div><div className="eyebrow">WORKSPACE</div><h1>设置</h1><p>控制登录、云端连接和扩展导入行为。</p></div></div><div className="settings-grid"><section className="settings-card"><div className="settings-card-icon"><ShieldCheck size={18} /></div><div><h2>隐私与账号</h2><p>{firebaseReady ? "Google 登录已配置。只有带 answerframeOwner 权限的账号可以读取收藏。" : "当前未配置 Firebase，网页只使用浏览器本地 Demo 数据。"}</p>{user ? <div className="settings-account"><span className="avatar large">{(user.displayName || user.email || "A").slice(0, 1).toUpperCase()}</span><div><strong>{user.displayName || "Google account"}</strong><span>{user.email}</span></div><span className={`claim-badge ${ownerAllowed ? "ok" : "pending"}`}>{ownerAllowed ? "Owner enabled" : "等待 owner claim"}</span></div> : <button className="button button-primary" onClick={onSignIn}><LogIn size={16} />使用 Google 登录</button>}</div></section><section className="settings-card"><div className="settings-card-icon"><Upload size={18} /></div><div><h2>Chrome 扩展</h2><p>在 ChatGPT assistant 回答下方出现 Save to AnswerFrame。确认预览后，扩展会打开此网页完成导入。</p><div className="install-steps"><span>1</span><div>进入 <code>apps/extension/dist</code>，在 Chrome 扩展页开启“开发者模式”并加载已解压扩展。</div><span>2</span><div>将 AnswerFrame 地址设置为当前网页地址。</div></div></div></section><section className="settings-card wide"><div className="settings-card-icon"><CircleHelp size={18} /></div><div><h2>开发状态</h2><div className="status-table"><div><span>Web app</span><b className="ready-dot">Ready</b></div><div><span>Firebase</span><b className={firebaseReady ? "ready-dot" : "muted-dot"}>{firebaseReady ? "Configured" : "Demo mode"}</b></div><div><span>Link validator</span><b className="muted-dot">Emulator scaffold</b></div><div><span>Chrome Web Store</span><b className="muted-dot">Not published</b></div></div></div></section></div></>;
+  return <><div className="page-heading"><div><div className="eyebrow">WORKSPACE</div><h1>设置</h1><p>控制登录、云端连接和扩展导入行为。</p></div></div><div className="settings-grid"><section className="settings-card"><div className="settings-card-icon"><ShieldCheck size={18} /></div><div><h2>隐私与账号</h2><p>{firebaseReady ? "Google 登录已配置。只有带 answerframeOwner 权限的账号可以读取收藏。" : "当前未配置 Firebase，网页使用浏览器本地 IndexedDB 保存截图和元数据。"}</p>{user ? <div className="settings-account"><span className="avatar large">{(user.displayName || user.email || "A").slice(0, 1).toUpperCase()}</span><div><strong>{user.displayName || "Google account"}</strong><span>{user.email}</span></div><span className={`claim-badge ${ownerAllowed ? "ok" : "pending"}`}>{ownerAllowed ? "Owner enabled" : "等待 owner claim"}</span></div> : <button className="button button-primary" onClick={onSignIn}><LogIn size={16} />使用 Google 登录</button>}</div></section><section className="settings-card"><div className="settings-card-icon"><Upload size={18} /></div><div><h2>Chrome 扩展</h2><p>在 ChatGPT 或 Gemini assistant 回答下方出现 Save to AnswerFrame。确认预览后，扩展会打开此网页完成导入。</p><div className="install-steps"><span>1</span><div>进入 <code>apps/extension/dist</code>，在 Chrome 扩展页开启“开发者模式”并加载已解压扩展。</div><span>2</span><div>将 AnswerFrame 地址设置为当前网页地址。</div></div></div></section><section className="settings-card wide"><div className="settings-card-icon"><CircleHelp size={18} /></div><div><h2>开发状态</h2><div className="status-table"><div><span>Web app</span><b className="ready-dot">Ready</b></div><div><span>Firebase</span><b className={firebaseReady ? "ready-dot" : "muted-dot"}>{firebaseReady ? "Configured" : "Demo mode"}</b></div><div><span>Link validator</span><b className="muted-dot">Emulator scaffold</b></div><div><span>Chrome Web Store</span><b className="muted-dot">Not published</b></div></div></div></section></div></>;
 }
 
 type PendingDraft = CaptureDraft & { _metadata?: { title?: string; note?: string; tags?: string[] } };
@@ -385,7 +395,7 @@ function ImportModal({ draft, onCancel, onConfirm }: { draft: PendingDraft; onCa
   const [question, setQuestion] = useState(draft.question);
   const [title, setTitle] = useState(draft._metadata?.title || draft.answerText.split(/\r?\n/).map((line) => line.trim()).find(Boolean)?.slice(0, 100) || "Saved AI answer");
   const [note, setNote] = useState(draft._metadata?.note || "");
-  const [tags, setTags] = useState((draft._metadata?.tags || ["ChatGPT"]).join(", "));
+  const [tags, setTags] = useState((draft._metadata?.tags || [platformLabel(draft.platform)]).join(", "));
   const [saving, setSaving] = useState(false);
   const confirm = () => { setSaving(true); onConfirm({ ...draft, question }, { title, note, tags: tags.split(",").map((tag) => tag.trim()).filter(Boolean) }); };
   return <div className="modal-backdrop"><section className="import-modal" role="dialog" aria-modal="true" aria-labelledby="import-title"><div className="modal-header"><div><div className="eyebrow">CAPTURE PREVIEW</div><h2 id="import-title">保存到 AnswerFrame</h2><p>先确认截图、问题和来源清单，再上传到你的私有库。</p></div><button className="icon-button" onClick={onCancel} aria-label="取消"><X size={19} /></button></div><div className="import-preview-grid"><div className="preview-shot"><ResolvedImage path={draft.screenshotParts[0]?.dataUrl} alt="回答截图预览" /><span className="preview-pages">{draft.screenshotParts.length} page{draft.screenshotParts.length > 1 ? "s" : ""}</span></div><div className="preview-meta"><label>标题<input value={title} onChange={(event) => setTitle(event.target.value)} /></label><label>用户问题<textarea rows={4} value={question} onChange={(event) => setQuestion(event.target.value)} /></label><label>笔记<textarea rows={2} value={note} onChange={(event) => setNote(event.target.value)} placeholder="稍后要继续聊什么？" /></label><label>标签<input value={tags} onChange={(event) => setTags(event.target.value)} /></label></div></div><div className="preview-links"><div className="preview-links-heading"><span><Link2 size={16} />检测到 {draft.links.length} 个来源</span><small>链接会在上传后异步检查</small></div>{draft.links.length === 0 ? <div className="unresolved-empty">未发现可解析链接；回答中的无 URL 引用仍会保留。</div> : <div className="preview-link-list">{draft.links.map((link) => <div key={link.id} className="preview-link-row"><span className={`source-icon source-${link.kind}`}>{link.kind === "youtube" ? <Youtube size={14} /> : <Link2 size={14} />}</span><span>{link.label}</span><small>{link.url || "需要补充 URL"}</small><span className={`status-chip ${statusTone(link.status)}`}><span />{linkStatusLabel(link.status)}</span></div>)}</div>}</div><div className="modal-footer"><span><ShieldCheck size={15} />只会上传截图和元数据，不上传视频或论文正文</span><div><button className="button button-quiet" onClick={onCancel}>取消</button><button className="button button-primary" onClick={confirm} disabled={saving}>{saving ? "上传中…" : <><Upload size={16} />确认并保存</>}</button></div></div></section></div>;

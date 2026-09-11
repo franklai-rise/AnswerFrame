@@ -30,6 +30,8 @@ export interface ClipRepository {
 }
 
 const STORAGE_KEY = "answerframe.clips.v1";
+const LOCAL_DB_NAME = "answerframe.local.v1";
+const LOCAL_STORE_NAME = "clips";
 
 function readLocal(): ClipRecord[] {
   try {
@@ -41,8 +43,70 @@ function readLocal(): ClipRecord[] {
   }
 }
 
-function writeLocal(records: ClipRecord[]): void {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(records));
+let localDbPromise: Promise<IDBDatabase> | undefined;
+let localSeedPromise: Promise<void> | undefined;
+
+function openLocalDb(): Promise<IDBDatabase> {
+  if (localDbPromise) return localDbPromise;
+  if (typeof indexedDB === "undefined") return Promise.reject(new Error("当前浏览器不支持本地 IndexedDB"));
+  localDbPromise = new Promise((resolve, reject) => {
+    const request = indexedDB.open(LOCAL_DB_NAME, 1);
+    request.onupgradeneeded = () => {
+      const db = request.result;
+      if (!db.objectStoreNames.contains(LOCAL_STORE_NAME)) db.createObjectStore(LOCAL_STORE_NAME, { keyPath: "id" });
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error || new Error("无法打开本地收藏库"));
+  });
+  return localDbPromise;
+}
+
+function idbRequest<T>(request: IDBRequest<T>): Promise<T> {
+  return new Promise((resolve, reject) => {
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error || new Error("本地收藏库读写失败"));
+  });
+}
+
+async function readLocalDb(): Promise<ClipRecord[]> {
+  const db = await openLocalDb();
+  const transaction = db.transaction(LOCAL_STORE_NAME, "readonly");
+  return idbRequest(transaction.objectStore(LOCAL_STORE_NAME).getAll()) as Promise<ClipRecord[]>;
+}
+
+async function writeLocalDb(record: ClipRecord): Promise<void> {
+  const db = await openLocalDb();
+  const transaction = db.transaction(LOCAL_STORE_NAME, "readwrite");
+  await idbRequest(transaction.objectStore(LOCAL_STORE_NAME).put(record));
+}
+
+async function deleteLocalDb(id: string): Promise<void> {
+  const db = await openLocalDb();
+  const transaction = db.transaction(LOCAL_STORE_NAME, "readwrite");
+  await idbRequest(transaction.objectStore(LOCAL_STORE_NAME).delete(id));
+}
+
+async function ensureLocalData(): Promise<void> {
+  if (localSeedPromise) return localSeedPromise;
+  localSeedPromise = (async () => {
+    const records = await readLocalDb();
+    if (records.length) return;
+    const migrated = readLocal();
+    const seed = migrated.length ? migrated : [makeDemoClip()];
+    const db = await openLocalDb();
+    const transaction = db.transaction(LOCAL_STORE_NAME, "readwrite");
+    const store = transaction.objectStore(LOCAL_STORE_NAME);
+    for (const record of seed) store.put(record);
+    await new Promise<void>((resolve, reject) => {
+      transaction.oncomplete = () => resolve();
+      transaction.onerror = () => reject(transaction.error || new Error("无法初始化本地收藏库"));
+      transaction.onabort = () => reject(transaction.error || new Error("本地收藏库初始化被取消"));
+    });
+  })().catch((error) => {
+    localSeedPromise = undefined;
+    throw error;
+  });
+  return localSeedPromise;
 }
 
 function isoNow(): string {
@@ -82,73 +146,79 @@ class LocalClipRepository implements ClipRepository {
   private ownerUid: string;
   constructor(ownerUid = "demo-user") {
     this.ownerUid = ownerUid;
-    if (!localStorage.getItem(STORAGE_KEY)) writeLocal([makeDemoClip(ownerUid)]);
   }
 
   async list(includeDeleted = false): Promise<ClipRecord[]> {
-    return readLocal().filter((clip) => clip.ownerUid === this.ownerUid && (includeDeleted || !clip.deletedAt)).sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)));
+    await ensureLocalData();
+    return (await readLocalDb()).filter((clip) => clip.ownerUid === this.ownerUid && (includeDeleted || !clip.deletedAt)).sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)));
   }
 
   async saveDraft(draft: CaptureDraft, metadata = {}): Promise<ClipRecord> {
+    await ensureLocalData();
     const record = localRecordFromDraft(draft, this.ownerUid, metadata);
-    writeLocal([record, ...readLocal()]);
+    await writeLocalDb(record);
     return cloneClip(record);
   }
 
   async update(id: string, patch: ClipPatch): Promise<ClipRecord> {
-    const records = readLocal();
+    await ensureLocalData();
+    const records = await readLocalDb();
     const index = records.findIndex((item) => item.id === id && item.ownerUid === this.ownerUid);
     if (index < 0) throw new Error("Clip not found");
     records[index] = { ...records[index], ...patch, updatedAt: isoNow() };
-    writeLocal(records);
+    await writeLocalDb(records[index]);
     return cloneClip(records[index]);
   }
 
   async replaceScreenshot(id: string, parts: ScreenshotPart[]): Promise<ClipRecord> {
-    return this.update(id, { } as ClipPatch).then(() => {
-      const records = readLocal();
-      const index = records.findIndex((item) => item.id === id && item.ownerUid === this.ownerUid);
-      if (index < 0) throw new Error("Clip not found");
-      records[index] = {
-        ...records[index],
-        imageParts: parts.map((part) => ({ pageIndex: part.pageIndex, path: part.dataUrl, width: part.width, height: part.height })),
-        thumbnailPath: parts[0]?.dataUrl || records[index].thumbnailPath,
-        updatedAt: isoNow(),
-      };
-      writeLocal(records);
-      return cloneClip(records[index]);
-    });
+    await ensureLocalData();
+    const records = await readLocalDb();
+    const index = records.findIndex((item) => item.id === id && item.ownerUid === this.ownerUid);
+    if (index < 0) throw new Error("Clip not found");
+    records[index] = {
+      ...records[index],
+      imageParts: parts.map((part) => ({ pageIndex: part.pageIndex, path: part.dataUrl, width: part.width, height: part.height })),
+      thumbnailPath: parts[0]?.dataUrl || records[index].thumbnailPath,
+      updatedAt: isoNow(),
+    };
+    await writeLocalDb(records[index]);
+    return cloneClip(records[index]);
   }
 
   async softDelete(id: string): Promise<void> {
-    await this.update(id, { });
-    const records = readLocal();
+    await ensureLocalData();
+    const records = await readLocalDb();
     const index = records.findIndex((item) => item.id === id && item.ownerUid === this.ownerUid);
-    if (index >= 0) records[index].deletedAt = isoNow();
-    writeLocal(records);
+    if (index >= 0) {
+      records[index] = { ...records[index], deletedAt: isoNow(), updatedAt: isoNow() };
+      await writeLocalDb(records[index]);
+    }
   }
 
   async recheckLinks(id: string): Promise<ClipRecord> {
-    const records = readLocal();
+    await ensureLocalData();
+    const records = await readLocalDb();
     const index = records.findIndex((item) => item.id === id && item.ownerUid === this.ownerUid);
     if (index < 0) throw new Error("Clip not found");
     records[index] = { ...records[index], links: records[index].links.map((link) => link.url ? { ...link, status: "checking" } : { ...link, status: "unresolved" }), updatedAt: isoNow() };
-    writeLocal(records);
+    await writeLocalDb(records[index]);
     return cloneClip(records[index]);
   }
 
   async restore(id: string): Promise<void> {
-    const records = readLocal();
+    await ensureLocalData();
+    const records = await readLocalDb();
     const index = records.findIndex((item) => item.id === id && item.ownerUid === this.ownerUid);
     if (index >= 0) {
-      records[index].deletedAt = null;
-      records[index].updatedAt = isoNow();
-      writeLocal(records);
+      records[index] = { ...records[index], deletedAt: null, updatedAt: isoNow() };
+      await writeLocalDb(records[index]);
     }
   }
 
   async purge(id: string): Promise<void> {
-    writeLocal(readLocal().filter((item) => !(item.id === id && item.ownerUid === this.ownerUid)));
+    await ensureLocalData();
+    const records = await readLocalDb();
+    if (records.some((item) => item.id === id && item.ownerUid === this.ownerUid)) await deleteLocalDb(id);
   }
 }
 

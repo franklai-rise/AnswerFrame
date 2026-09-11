@@ -1,13 +1,15 @@
 {
   "manifest_version": 3,
   "name": "AnswerFrame: Save AI Answers & Sources",
-  "description": "Capture a ChatGPT answer, keep the question, and collect every source link in your private AnswerFrame library.",
-  "version": "0.1.1",
+  "description": "Capture ChatGPT or Gemini answers, keep the question, and collect source links in your private AnswerFrame library.",
+  "version": "0.2.0",
   "minimum_chrome_version": "109",
   "permissions": ["storage", "offscreen", "activeTab"],
   "host_permissions": [
     "https://chatgpt.com/*",
+    "https://*.chatgpt.com/*",
     "https://chat.openai.com/*",
+    "https://gemini.google.com/*",
     "http://localhost/*"
   ],
   "background": {
@@ -19,7 +21,7 @@
   },
   "content_scripts": [
     {
-      "matches": ["https://chatgpt.com/*", "https://chat.openai.com/*", "http://localhost/*"],
+      "matches": ["https://chatgpt.com/*", "https://*.chatgpt.com/*", "https://chat.openai.com/*", "https://gemini.google.com/*", "http://localhost/*"],
       "js": ["content.js"],
       "run_at": "document_idle"
     }
@@ -27,7 +29,7 @@
   "web_accessible_resources": [
     {
       "resources": ["offscreen.html"],
-      "matches": ["https://chatgpt.com/*", "https://chat.openai.com/*", "http://localhost/*"]
+      "matches": ["https://chatgpt.com/*", "https://*.chatgpt.com/*", "https://chat.openai.com/*", "https://gemini.google.com/*", "http://localhost/*"]
     }
   ],
   "externally_connectable": {

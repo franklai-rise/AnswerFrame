@@ -1,5 +1,8 @@
-export type Platform = "chatgpt";
+export type Platform = "chatgpt" | "gemini";
 export type Theme = "light" | "dark";
+
+/** Where a captured source was discovered in the provider UI. */
+export type LinkSurface = "answer" | "sources-panel" | "text" | "unresolved";
 
 export type LinkStatus =
   | "checking"
@@ -45,6 +48,7 @@ export interface CapturedLink {
   pageIndex: number;
   anchor: NormalizedAnchor;
   status: LinkStatus;
+  sourceSurface?: LinkSurface;
   statusCode?: number;
   finalUrl?: string;
   checkedAt?: string;
@@ -215,8 +219,8 @@ export function extractLinksFromRoot(root: Element, options: ExtractLinksOptions
     add(createLink(href, textFor(element, href), anchorForElement(element, options), found.length, pageIndex));
   });
 
-  root.querySelectorAll("iframe[src], video[src], [data-url], [data-href]").forEach((element) => {
-    const value = element.getAttribute("src") || element.getAttribute("data-url") || element.getAttribute("data-href") || "";
+  root.querySelectorAll("iframe[src], video[src], [data-url], [data-href], [data-source-url], [data-citation-url], [data-reference-url]").forEach((element) => {
+    const value = element.getAttribute("src") || element.getAttribute("data-url") || element.getAttribute("data-href") || element.getAttribute("data-source-url") || element.getAttribute("data-citation-url") || element.getAttribute("data-reference-url") || "";
     add(createLink(value, textFor(element, value), anchorForElement(element, options), found.length, pageIndex));
   });
 
@@ -228,10 +232,10 @@ export function extractLinksFromRoot(root: Element, options: ExtractLinksOptions
     add(createLink(`https://doi.org/${doi}`, doi, { x: 0, y: 0, width: 0, height: 0 }, found.length, pageIndex));
   }
 
-  const unresolvedSelectors = options.unresolvedSelectors ?? ["[data-citation]", "[data-source]", "[data-reference]"];
+  const unresolvedSelectors = options.unresolvedSelectors ?? ["[data-citation]", "[data-citation-id]", "[data-source]", "[data-source-id]", "[data-reference]", "[data-reference-id]"];
   for (const selector of unresolvedSelectors) {
     root.querySelectorAll(selector).forEach((element) => {
-      const value = element.getAttribute("data-url") || element.getAttribute("href") || "";
+      const value = element.getAttribute("data-url") || element.getAttribute("data-href") || element.getAttribute("data-source-url") || element.getAttribute("data-citation-url") || element.getAttribute("data-reference-url") || element.getAttribute("href") || "";
       if (normalizeUrl(value)) return;
       found.push({
         id: `link-${found.length + 1}`,

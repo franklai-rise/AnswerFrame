@@ -1,37 +1,20 @@
 import {
-  extractLinksFromRoot,
   type CaptureDraft,
   type ScreenshotPart,
 } from "@answerframe/shared";
+import { getCaptureAdapter, type CaptureAdapter } from "./adapters";
 
 const BUTTON_CLASS = "answerframe-save-button";
 const ROOT_MARK = "data-answerframe-root";
+const adapter: CaptureAdapter | undefined = getCaptureAdapter(window.location);
 let observer: MutationObserver | undefined;
 
 function answerRoots(): Element[] {
-  // ChatGPT has used several wrappers for a conversation turn over time. Keep
-  // the selector attribute-based so utility-class names containing slashes
-  // cannot turn it into invalid CSS.
-  const candidates = Array.from(document.querySelectorAll(
-    "[data-message-author-role='assistant'], [data-testid='conversation-turn'], [data-message-id], article, [class*='conversation-turn']",
-  ));
-  const roots: Element[] = [];
-  for (const candidate of candidates) {
-    const text = (candidate.textContent || "").trim();
-    if (!text || text.length < 20) continue;
-    const roleNode = candidate.matches("[data-message-author-role]")
-      ? candidate
-      : candidate.querySelector("[data-message-author-role]");
-    const role = roleNode?.getAttribute("data-message-author-role");
-    if (role !== "assistant") continue;
-    const markdown = candidate.querySelector(".markdown, [class*='markdown']");
-    const root = markdown?.closest("[data-message-author-role='assistant'], article") || candidate;
-    if (!roots.includes(root)) roots.push(root);
-  }
-  return roots;
+  return adapter?.findAnswerRoots() || [];
 }
 
 function injectButtons(): void {
+  if (!adapter) return;
   ensurePageStyles();
   for (const root of answerRoots()) {
     if (root.querySelector(`.${BUTTON_CLASS}`)) continue;
@@ -41,7 +24,12 @@ function injectButtons(): void {
     const button = document.createElement("button");
     button.className = BUTTON_CLASS;
     button.type = "button";
-    button.innerHTML = "<span class=\"answerframe-icon\">⌁</span><span>Save to AnswerFrame</span>";
+    const buttonIcon = document.createElement("span");
+    buttonIcon.className = "answerframe-icon";
+    buttonIcon.textContent = "⌁";
+    const buttonLabel = document.createElement("span");
+    buttonLabel.textContent = "Save to AnswerFrame";
+    button.append(buttonIcon, buttonLabel);
     button.addEventListener("click", () => void captureAnswer(root, button));
     actionBar.append(button);
     root.append(actionBar);
@@ -49,6 +37,11 @@ function injectButtons(): void {
 }
 
 async function captureAnswer(root: Element, button: HTMLButtonElement): Promise<void> {
+  if (!adapter) return;
+  if (!adapter.isAnswerComplete(root)) {
+    showToast(`${adapter.label} 正在生成回答，请完成后再保存`, true);
+    return;
+  }
   button.disabled = true;
   button.dataset.state = "capturing";
   const scrollTarget = findScrollTarget(root);
@@ -58,12 +51,17 @@ async function captureAnswer(root: Element, button: HTMLButtonElement): Promise<
   const totalHeight = Math.max((root as HTMLElement).scrollHeight || rootRect.height, rootRect.height);
   const rootTop = rootRect.top + originalScroll;
   const dpr = window.devicePixelRatio || 1;
-  const theme = document.documentElement.classList.contains("dark") || getComputedStyle(document.body).backgroundColor === "rgb(52, 53, 65)" ? "dark" : "light";
-  const links = extractLinksFromRoot(root, { rootRect: { left: rootRect.left, top: rootRect.top, width: rootRect.width, height: totalHeight } });
-  const answerText = (root.querySelector(".markdown, [class*='markdown']")?.textContent || root.textContent || "").replace(/\n{3,}/g, "\n\n").trim();
-  const question = findPreviousQuestion(root);
-  document.documentElement.classList.add("answerframe-capture-mode");
+  const captureRect = { left: rootRect.left, top: rootRect.top, width: rootRect.width, height: totalHeight };
+  const theme = adapter.getTheme();
+  const answerText = adapter.getAnswerText(root);
+  const question = adapter.findPreviousQuestion(root);
   try {
+    // Read links while the answer is at the user's original scroll position so
+    // normalized anchors map to the stitched screenshot rather than the final
+    // segment captured below. Gemini may briefly open and close its Sources
+    // panel here; it is not included in the screenshot.
+    const links = await adapter.collectLinks(root, captureRect);
+    document.documentElement.classList.add("answerframe-capture-mode");
     const viewportHeight = Math.max(260, window.innerHeight - 104);
     const segmentHeight = Math.min(viewportHeight, 1200);
     const crops: string[] = [];
@@ -79,10 +77,10 @@ async function captureAnswer(root: Element, button: HTMLButtonElement): Promise<
       crops.push(await cropDataUrl(capture.dataUrl, { left: currentRect.left, top, width: currentRect.width, height: bottom - top }, dpr));
     }
     const screenshotParts = await stitchCrops(crops, 1600, 15000);
-    const draft: CaptureDraft = { platform: "chatgpt", conversationUrl: window.location.href, question, answerText, theme, screenshotParts, links };
+    const draft: CaptureDraft = { platform: adapter.platform, conversationUrl: window.location.href, question, answerText, theme, screenshotParts, links };
     showPreview(draft);
   } catch (error) {
-    showToast(error instanceof Error ? error.message : "捕获失败；请保持 ChatGPT 标签页可见后重试", true);
+    showToast(error instanceof Error ? error.message : `捕获失败；请保持 ${adapter.label} 标签页可见后重试`, true);
   } finally {
     document.documentElement.classList.remove("answerframe-capture-mode");
     writeScrollTop(scrollTarget, originalScroll);
@@ -109,15 +107,6 @@ function readScrollTop(target: Element | Window): number {
 function writeScrollTop(target: Element | Window, value: number): void {
   if (target === window) window.scrollTo({ top: value, behavior: "instant" as ScrollBehavior });
   else (target as Element).scrollTop = value;
-}
-
-function findPreviousQuestion(root: Element): string {
-  const all = Array.from(document.querySelectorAll("[data-message-author-role='user'], [data-message-author-role='assistant']"));
-  const index = all.findIndex((item) => item === root || item.contains(root) || root.contains(item));
-  for (let i = index - 1; i >= 0; i -= 1) {
-    if (all[i].getAttribute("data-message-author-role") === "user") return (all[i].textContent || "").replace(/\s+/g, " ").trim();
-  }
-  return "";
 }
 
 async function cropDataUrl(dataUrl: string, rect: { left: number; top: number; width: number; height: number }, dpr: number): Promise<string> {
@@ -155,10 +144,83 @@ async function stitchCrops(crops: string[], maxWidth: number, maxPageHeight: num
 function loadImage(src: string): Promise<HTMLImageElement> { return new Promise((resolve, reject) => { const image = new Image(); image.onload = () => resolve(image); image.onerror = () => reject(new Error("无法读取截图")); image.src = src; }); }
 function delay(ms: number): Promise<void> { return new Promise((resolve) => window.setTimeout(resolve, ms)); }
 
+function makeElement<K extends keyof HTMLElementTagNameMap>(tag: K, className?: string, text?: string): HTMLElementTagNameMap[K] {
+  const element = document.createElement(tag);
+  if (className) element.className = className;
+  if (text !== undefined) element.textContent = text;
+  return element;
+}
+
+function makeField<K extends "input" | "textarea">(labelText: string, control: HTMLElementTagNameMap[K]): HTMLLabelElement {
+  const label = makeElement("label");
+  label.append(document.createTextNode(labelText), control);
+  return label;
+}
+
 function showPreview(draft: CaptureDraft): void {
   const old = document.getElementById("answerframe-preview-host"); old?.remove();
   const host = document.createElement("div"); host.id = "answerframe-preview-host"; const shadow = host.attachShadow({ mode: "open" });
-  shadow.innerHTML = `<style>${previewStyles()}</style><div class="backdrop"><section class="modal"><header><div><div class="eyebrow">CAPTURE PREVIEW</div><h2>保存到 AnswerFrame</h2><p>确认后才会上传到你的私有收藏库。</p></div><button class="close" data-action="cancel">×</button></header><div class="body"><div class="shot"><img src="${escapeHtml(draft.screenshotParts[0]?.dataUrl || "")}" /><span>${draft.screenshotParts.length} page${draft.screenshotParts.length > 1 ? "s" : ""}</span></div><div class="meta"><label>用户问题<textarea data-field="question">${escapeHtml(draft.question)}</textarea></label><label>标题<input data-field="title" value="${escapeHtml(draft.answerText.split(/\n/).find(Boolean)?.slice(0, 100) || "Saved AI answer")}" /></label><label>笔记<textarea data-field="note" placeholder="稍后要继续聊什么？"></textarea></label><label>标签<input data-field="tags" value="ChatGPT" /></label></div></div><div class="sources"><strong>检测到 ${draft.links.length} 个来源</strong><div class="source-list">${draft.links.map((link) => `<div class="source"><span class="source-kind">${escapeHtml(link.kind)}</span><span>${escapeHtml(link.label)}</span><small>${escapeHtml(link.url || "需要补充 URL")}</small></div>`).join("")}</div></div><footer><span>🔒 只上传截图和元数据</span><div><button class="quiet" data-action="cancel">取消</button><button class="primary" data-action="confirm">确认并打开库</button></div></footer></section></div>`;
+  const style = makeElement("style");
+  style.textContent = previewStyles();
+  const backdrop = makeElement("div", "backdrop");
+  const modal = makeElement("section", "modal");
+  const header = makeElement("header");
+  const heading = makeElement("div");
+  heading.append(makeElement("div", "eyebrow", "CAPTURE PREVIEW"), makeElement("h2", undefined, "保存到 AnswerFrame"), makeElement("p", undefined, "确认后才会上传到你的私有收藏库。"));
+  const closeButton = makeElement("button", "close", "×");
+  closeButton.type = "button";
+  closeButton.setAttribute("data-action", "cancel");
+  header.append(heading, closeButton);
+
+  const body = makeElement("div", "body");
+  const shot = makeElement("div", "shot");
+  const shotImage = makeElement("img");
+  shotImage.src = draft.screenshotParts[0]?.dataUrl || "";
+  shotImage.alt = "回答截图预览";
+  shot.append(shotImage, makeElement("span", undefined, `${draft.screenshotParts.length} page${draft.screenshotParts.length > 1 ? "s" : ""}`));
+  const meta = makeElement("div", "meta");
+  const questionField = makeElement("textarea");
+  questionField.setAttribute("data-field", "question");
+  questionField.value = draft.question;
+  const titleField = makeElement("input");
+  titleField.setAttribute("data-field", "title");
+  titleField.value = draft.answerText.split(/\n/).find(Boolean)?.slice(0, 100) || "Saved AI answer";
+  const noteField = makeElement("textarea");
+  noteField.setAttribute("data-field", "note");
+  noteField.placeholder = "稍后要继续聊什么？";
+  const tagsField = makeElement("input");
+  tagsField.setAttribute("data-field", "tags");
+  tagsField.value = "ChatGPT";
+  meta.append(makeField("用户问题", questionField), makeField("标题", titleField), makeField("笔记", noteField), makeField("标签", tagsField));
+  body.append(shot, meta);
+
+  const sources = makeElement("div", "sources");
+  const sourceList = makeElement("div", "source-list");
+  sources.append(makeElement("strong", undefined, `检测到 ${draft.links.length} 个来源`), sourceList);
+  for (const link of draft.links) {
+    const source = makeElement("div", "source");
+    source.append(makeElement("span", "source-kind", link.kind), makeElement("span", undefined, link.label), makeElement("small", undefined, link.url || "需要补充 URL"));
+    sourceList.append(source);
+  }
+
+  const footer = makeElement("footer");
+  const footerNote = makeElement("span", undefined, "🔒 只上传截图和元数据");
+  const footerActions = makeElement("div");
+  const cancelButton = makeElement("button", "quiet", "取消");
+  cancelButton.type = "button";
+  cancelButton.setAttribute("data-action", "cancel");
+  const confirmButton = makeElement("button", "primary", "确认并打开库");
+  confirmButton.type = "button";
+  confirmButton.setAttribute("data-action", "confirm");
+  footerActions.append(cancelButton, confirmButton);
+  footer.append(footerNote, footerActions);
+  modal.append(header, body, sources, footer);
+  backdrop.append(modal);
+  shadow.append(style, backdrop);
+  const platformTag = draft.platform === "gemini" ? "Gemini" : "ChatGPT";
+  const eyebrow = shadow.querySelector<HTMLElement>(".eyebrow");
+  if (eyebrow) eyebrow.textContent = `${platformTag.toUpperCase()} · CAPTURE PREVIEW`;
+  tagsField.value = platformTag;
   document.documentElement.append(host);
   shadow.querySelectorAll<HTMLElement>("[data-action='cancel']").forEach((element) => element.addEventListener("click", () => host.remove()));
   shadow.querySelector("[data-action='confirm']")?.addEventListener("click", () => {
@@ -168,22 +230,51 @@ function showPreview(draft: CaptureDraft): void {
     const tags = (shadow.querySelector<HTMLInputElement>("[data-field='tags']")?.value || "").split(",").map((tag) => tag.trim()).filter(Boolean);
     const button = shadow.querySelector<HTMLButtonElement>("[data-action='confirm']"); if (button) { button.disabled = true; button.textContent = "正在打开…"; }
     const enrichedDraft = { ...draft, question, _metadata: { title, note, tags } };
-    void chrome.runtime.sendMessage({ type: "open-library-with-draft", draft: enrichedDraft }).then((response) => { if (response?.error) showToast(response.error, true); else host.remove(); });
+    void chrome.runtime.sendMessage({ type: "open-library-with-draft", draft: enrichedDraft }).then((response) => {
+      if (response?.ok) { host.remove(); return; }
+      if (button) { button.disabled = false; button.textContent = "确认并打开库"; }
+      showToast(response?.error || "AnswerFrame 网页没有确认收到草稿", true);
+    }).catch((error) => {
+      if (button) { button.disabled = false; button.textContent = "确认并打开库"; }
+      showToast(error instanceof Error ? error.message : "无法打开 AnswerFrame 网页", true);
+    });
     void chrome.storage.local.set({ answerframeLastDraft: { ...draft, question, _metadata: { title, note, tags } } });
   });
 }
 
 function showToast(message: string, error = false): void { const old = document.getElementById("answerframe-toast"); old?.remove(); const toast = document.createElement("div"); toast.id = "answerframe-toast"; toast.textContent = `${error ? "⚠" : "✓"} ${message}`; document.body.append(toast); window.setTimeout(() => toast.remove(), 4000); }
-function escapeHtml(value: string): string { return value.replace(/[&<>"']/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#039;" }[character] || character)); }
 function previewStyles(): string { return `.backdrop{position:fixed;inset:0;z-index:2147483647;display:grid;place-items:center;padding:20px;background:rgba(16,24,40,.43);backdrop-filter:blur(7px);font-family:Arial,"Microsoft YaHei",sans-serif;color:#202d43}.modal{width:min(820px,calc(100vw - 40px));max-height:calc(100vh - 40px);overflow:auto;border-radius:16px;background:#fff;box-shadow:0 30px 90px rgba(15,25,49,.3)}header,footer{display:flex;align-items:flex-start;justify-content:space-between;gap:14px;padding:22px 25px;border-bottom:1px solid #e5e9f1}footer{align-items:center;border-top:1px solid #e5e9f1;border-bottom:0;background:#fbfcff}.eyebrow{color:#9aa6b7;font-size:10px;letter-spacing:.16em;font-weight:600}h2{font-size:21px;margin:7px 0 5px}p{color:#8995a6;font-size:11px;margin:0}.close{border:0;background:transparent;color:#8994a7;font-size:24px;line-height:1;cursor:pointer}.body{display:grid;grid-template-columns:1.05fr .95fr;gap:20px;padding:21px 25px}.shot{position:relative;min-height:285px;overflow:hidden;border:1px solid #dee5ef;border-radius:9px;background:#edf1f7}.shot img{display:block;width:100%;height:100%;min-height:285px;object-fit:contain}.shot span{position:absolute;right:8px;bottom:8px;color:#fff;background:rgba(20,31,53,.62);padding:4px 6px;border-radius:4px;font-size:9px}.meta{display:grid;gap:11px;align-content:start}.meta label{display:grid;gap:5px;color:#68768b;font-size:11px;font-weight:600}.meta input,.meta textarea{width:100%;resize:vertical;outline:0;border:1px solid #dfe5ee;border-radius:7px;padding:8px 9px;color:#3a4a62;background:#fcfdff;font-size:11px;font-weight:400}.sources{padding:0 25px 20px}.sources strong{display:block;color:#5d6b83;font-size:12px;margin-bottom:8px}.source-list{display:grid;gap:5px;max-height:135px;overflow:auto}.source{display:grid;grid-template-columns:54px minmax(90px,1fr) minmax(100px,1.2fr);gap:7px;align-items:center;padding:7px;border:1px solid #edf0f4;border-radius:7px;font-size:10px;color:#56657d}.source-kind{color:#6b73ce;font-size:9px}.source small{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#9aa5b5;font-size:9px}.quiet,.primary{border-radius:7px;padding:9px 12px;font-size:11px;font-weight:600;cursor:pointer}.quiet{border:1px solid #e1e6ef;background:#fff;color:#66758c}.primary{border:0;background:#5d65d9;color:#fff}footer>span{color:#8d99a9;font-size:10px}@media(max-width:650px){.body{grid-template-columns:1fr;padding:16px}.sources{padding:0 16px 16px}header,footer{padding:17px 16px}footer{align-items:flex-start;flex-direction:column}.shot{min-height:190px}.shot img{min-height:190px}}`; }
 
-function bridgeLibraryMessages(): void { chrome.runtime.onMessage.addListener((message) => { if (message?.type === "answerframe:forward-draft") window.postMessage({ type: "answerframe:draft", draft: message.draft }, "*"); }); }
+function bridgeLibraryMessages(): void {
+  chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+    if (message?.type !== "answerframe:forward-draft") return false;
+    const requestId = `draft-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    let settled = false;
+    const finish = (response: { ok: boolean; error?: string }) => {
+      if (settled) return;
+      settled = true;
+      window.removeEventListener("message", onAck);
+      sendResponse(response);
+    };
+    const onAck = (event: MessageEvent) => {
+      if (event.source !== window || event.data?.type !== "answerframe:draft-ack" || event.data.requestId !== requestId) return;
+      finish({ ok: true });
+    };
+    window.addEventListener("message", onAck);
+    window.postMessage({ type: "answerframe:draft", draft: message.draft, requestId }, "*");
+    window.setTimeout(() => finish({ ok: false, error: "AnswerFrame 网页尚未准备好" }), 2_500);
+    return true;
+  });
+}
 
 function ensurePageStyles(): void {
   if (document.getElementById("answerframe-page-style")) return;
   const style = document.createElement("style");
   style.id = "answerframe-page-style";
-  style.textContent = `.answerframe-actions{display:flex;justify-content:flex-end;gap:8px;margin:8px 0 2px;opacity:.78}.answerframe-save-button{display:inline-flex;align-items:center;gap:6px;border:1px solid #d9def0;border-radius:7px;padding:6px 9px;color:#626bd5;background:#f8f8ff;font:500 11px/1.2 Arial,sans-serif;cursor:pointer;transition:.15s ease}.answerframe-save-button:hover{background:#eeefff;border-color:#bfc4f4}.answerframe-save-button:disabled{cursor:wait;opacity:.58}.answerframe-save-button[data-state=capturing]{color:#9b7a37;border-color:#efdfb7;background:#fffaf0}.answerframe-icon{font-size:16px;line-height:10px}.answerframe-capture-mode .answerframe-actions,.answerframe-capture-mode button[aria-label*="Copy"],.answerframe-capture-mode button[aria-label*="复制"],.answerframe-capture-mode [data-testid*="copy"],.answerframe-capture-mode [data-testid*="feedback"]{visibility:hidden!important}`;
+  const hiddenControls = adapter?.captureHideSelectors
+    .map((selector) => `.answerframe-capture-mode ${selector}`)
+    .join(",") || ".answerframe-capture-mode .answerframe-actions";
+  style.textContent = `.answerframe-actions{display:flex;justify-content:flex-end;gap:8px;margin:8px 0 2px;opacity:.78}.answerframe-save-button{display:inline-flex;align-items:center;gap:6px;border:1px solid #d9def0;border-radius:7px;padding:6px 9px;color:#626bd5;background:#f8f8ff;font:500 11px/1.2 Arial,sans-serif;cursor:pointer;transition:.15s ease}.answerframe-save-button:hover{background:#eeefff;border-color:#bfc4f4}.answerframe-save-button:disabled{cursor:wait;opacity:.58}.answerframe-save-button[data-state=capturing]{color:#9b7a37;border-color:#efdfb7;background:#fffaf0}.answerframe-icon{font-size:16px;line-height:10px}${hiddenControls}{visibility:hidden!important}`;
   (document.head || document.documentElement).append(style);
 }
 

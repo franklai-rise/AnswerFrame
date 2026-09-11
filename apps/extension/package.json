@@ -1,11 +1,12 @@
 {
   "name": "@answerframe/extension",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
   "scripts": {
     "build": "node build.mjs",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node ../../node_modules/vitest/vitest.mjs run"
   },
   "dependencies": {
     "@answerframe/shared": "file:../../packages/shared",
@@ -14,6 +15,8 @@
   "devDependencies": {
     "@types/chrome": "^0.0.326",
     "esbuild": "^0.25.5",
-    "typescript": "^5.8.3"
+    "jsdom": "^26.1.0",
+    "typescript": "^5.8.3",
+    "vitest": "^3.2.4"
   }
 }
