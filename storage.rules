@@ -1,0 +1,18 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    function ownerEnabled() {
+      return request.auth != null && request.auth.token.answerframeOwner == true;
+    }
+    function imageUpload() {
+      return request.resource != null
+        && request.resource.size < 8 * 1024 * 1024
+        && request.resource.contentType.matches('image/(webp|png|jpeg|jpg)');
+    }
+    match /users/{userId}/clips/{clipId}/{fileName} {
+      allow read: if ownerEnabled() && request.auth.uid == userId;
+      allow write: if ownerEnabled() && request.auth.uid == userId && imageUpload();
+      allow delete: if ownerEnabled() && request.auth.uid == userId;
+    }
+  }
+}

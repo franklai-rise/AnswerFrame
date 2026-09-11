@@ -1,0 +1,52 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+    function ownerEnabled() {
+      return signedIn() && request.auth.token.answerframeOwner == true;
+    }
+    function isOwner(userId) {
+      return ownerEnabled() && request.auth.uid == userId;
+    }
+    function validClipShape(data) {
+      return data.keys().hasAll([
+        'id', 'ownerUid', 'platform', 'conversationUrl', 'question',
+        'answerText', 'theme', 'links', 'title', 'note', 'tags',
+        'imageParts', 'thumbnailPath', 'createdAt', 'updatedAt',
+        'deletedAt', 'schemaVersion'
+      ])
+      && data.ownerUid is string
+      && data.platform == 'chatgpt'
+      && data.theme in ['light', 'dark']
+      && data.title is string
+      && data.question is string
+      && data.answerText is string
+      && data.note is string
+      && data.tags is list
+      && data.links is list
+      && data.schemaVersion == 1;
+    }
+
+    match /users/{userId} {
+      allow read: if isOwner(userId);
+      allow write: if false;
+      match /clips/{clipId} {
+        allow read: if isOwner(userId);
+        allow create: if isOwner(userId)
+          && request.resource.data.id == clipId
+          && request.resource.data.ownerUid == userId
+          && validClipShape(request.resource.data);
+        allow update: if isOwner(userId)
+          && resource.data.ownerUid == userId
+          && request.resource.data.ownerUid == userId
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+            'title', 'question', 'note', 'tags', 'links', 'imageParts',
+            'thumbnailPath', 'updatedAt', 'deletedAt'
+          ]);
+        allow delete: if isOwner(userId);
+      }
+    }
+  }
+}

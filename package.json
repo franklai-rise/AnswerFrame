@@ -1,0 +1,33 @@
+{
+  "name": "answerframe",
+  "private": true,
+  "version": "0.1.0",
+  "description": "AnswerFrame — Visual AI Answer Library",
+  "type": "module",
+  "workspaces": [
+    "apps/web",
+    "apps/extension",
+    "packages/shared",
+    "functions"
+  ],
+  "scripts": {
+    "dev": "npm --workspace packages/shared run build && npm --workspace apps/web run dev --",
+    "preview:web": "npm --workspace apps/web run preview",
+    "start:answerframe": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/Start-AnswerFrame.ps1",
+    "install:startup": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/Install-AnswerFrameStartup.ps1",
+    "build": "npm run build:shared && npm run build:web && npm run build:extension",
+    "build:shared": "npm --workspace packages/shared run build",
+    "build:web": "npm run build:shared && npm --workspace apps/web run build",
+    "build:extension": "npm run build:shared && npm --workspace apps/extension run build",
+    "test": "npm --workspace packages/shared run test && npm --workspace apps/web run test",
+    "test:shared": "npm --workspace packages/shared run test",
+    "test:web": "npm --workspace apps/web run test",
+    "test:functions": "npm --workspace packages/shared run build && npm --workspace functions run build",
+    "grant-owner": "node functions/scripts/grant-owner-claim.mjs",
+    "firebase:emulators": "firebase emulators:start --config firebase.json",
+    "firebase:deploy:dev": "firebase deploy --config firebase.json --only hosting,firestore:rules,storage,functions"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

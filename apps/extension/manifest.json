@@ -1,0 +1,36 @@
+{
+  "manifest_version": 3,
+  "name": "AnswerFrame: Save AI Answers & Sources",
+  "description": "Capture a ChatGPT answer, keep the question, and collect every source link in your private AnswerFrame library.",
+  "version": "0.1.1",
+  "minimum_chrome_version": "109",
+  "permissions": ["storage", "offscreen", "activeTab"],
+  "host_permissions": [
+    "https://chatgpt.com/*",
+    "https://chat.openai.com/*",
+    "http://localhost/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "Open AnswerFrame",
+    "default_popup": "popup.html"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://chatgpt.com/*", "https://chat.openai.com/*", "http://localhost/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["offscreen.html"],
+      "matches": ["https://chatgpt.com/*", "https://chat.openai.com/*", "http://localhost/*"]
+    }
+  ],
+  "externally_connectable": {
+    "matches": ["http://localhost/*"]
+  }
+}
