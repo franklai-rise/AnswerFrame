@@ -120,9 +120,12 @@ On a ChatGPT or Gemini page, each detected assistant/model answer receives
 **Save to AnswerFrame**. The capture flow temporarily hides controls, captures
 visible segments at least 550 ms apart, crops and stitches them, restores scroll
 and focus in `finally`, then opens an in-page preview. Only after confirmation
-does the extension open the library and forward the draft. Gemini source links
-found in the answer and in its Sources panel are merged and de-duplicated while
-retaining a `sourceSurface` marker.
+does the extension open the library and forward the draft. After the database
+write completes, the library shows a persistent **保存成功** confirmation with
+the saved title and a direct **查看详情** action; a failed write leaves the
+preview open so it can be retried. Gemini source links
+  found in the answer and in its Sources panel are merged and de-duplicated while
+  retaining a `sourceSurface` marker.
 
 ## Deliberate v1 boundaries
 
