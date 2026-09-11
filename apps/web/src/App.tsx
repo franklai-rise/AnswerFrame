@@ -48,6 +48,7 @@ import { createRepository, resolveImageUrl, type ClipRepository } from "./lib/re
 
 type Route = "library" | "trash" | "settings" | "detail";
 type ViewMode = "grid" | "list";
+type SaveConfirmation = { id: string; title: string };
 
 const routeFromLocation = (): Route => {
   const path = window.location.pathname;
@@ -108,6 +109,7 @@ function App() {
   const [tagFilter, setTagFilter] = useState("all");
   const [kindFilter, setKindFilter] = useState("all");
   const [toast, setToast] = useState<string | null>(null);
+  const [saveConfirmation, setSaveConfirmation] = useState<SaveConfirmation | null>(null);
   const [importDraft, setImportDraft] = useState<PendingDraft | null>(null);
   const [mobileMenu, setMobileMenu] = useState(false);
 
@@ -174,16 +176,20 @@ function App() {
     });
   }, [clips, query, platformFilter, tagFilter, kindFilter]);
 
-  const saveDraft = async (draft: CaptureDraft, metadata: { title?: string; note?: string; tags?: string[] }) => {
+  const saveDraft = async (draft: CaptureDraft, metadata: { title?: string; note?: string; tags?: string[] }): Promise<boolean> => {
+    setSaveConfirmation(null);
     try {
       const record = await repo.saveDraft(draft, metadata);
       await reload();
       setImportDraft(null);
       setSelectedId(record.id);
       navigate(`/clip/${record.id}`);
+      setSaveConfirmation({ id: record.id, title: record.title });
       notify("已保存到 AnswerFrame");
+      return true;
     } catch (error) {
       notify(error instanceof Error ? error.message : "上传失败，未产生半成品记录");
+      return false;
     }
   };
 
@@ -264,8 +270,12 @@ function App() {
           {route === "settings" && <SettingsPage user={user} ownerAllowed={ownerAllowed} firebaseReady={firebaseEnabled} onSignIn={() => void signIn()} />}
         </main>
       </div>
-      {importDraft && <ImportModal draft={importDraft} onCancel={() => setImportDraft(null)} onConfirm={(draft, metadata) => void saveDraft(draft, metadata)} />}
+      {importDraft && <ImportModal draft={importDraft} onCancel={() => setImportDraft(null)} onConfirm={(draft, metadata) => saveDraft(draft, metadata)} />}
       {toast && <div className="toast" role="status"><Check size={16} />{toast}</div>}
+      {saveConfirmation && <div className="save-success" data-testid="save-success" role="alert" aria-live="polite">
+        <div className="save-success-copy"><span className="save-success-icon"><Check size={17} /></span><div><strong>保存成功</strong><span>已加入收藏库：{saveConfirmation.title}</span></div></div>
+        <div className="save-success-actions"><button className="button button-quiet" onClick={() => { const id = saveConfirmation.id; setSaveConfirmation(null); navigate(`/clip/${id}`); }}>查看详情</button><button className="icon-button" aria-label="关闭保存成功提示" onClick={() => setSaveConfirmation(null)}><X size={16} /></button></div>
+      </div>}
     </div>
   );
 }
@@ -391,13 +401,22 @@ function SettingsPage({ user, ownerAllowed, firebaseReady, onSignIn }: { user: U
 
 type PendingDraft = CaptureDraft & { _metadata?: { title?: string; note?: string; tags?: string[] } };
 
-function ImportModal({ draft, onCancel, onConfirm }: { draft: PendingDraft; onCancel: () => void; onConfirm: (draft: CaptureDraft, metadata: { title: string; note: string; tags: string[] }) => void }) {
+function ImportModal({ draft, onCancel, onConfirm }: { draft: PendingDraft; onCancel: () => void; onConfirm: (draft: CaptureDraft, metadata: { title: string; note: string; tags: string[] }) => Promise<boolean> }) {
   const [question, setQuestion] = useState(draft.question);
   const [title, setTitle] = useState(draft._metadata?.title || draft.answerText.split(/\r?\n/).map((line) => line.trim()).find(Boolean)?.slice(0, 100) || "Saved AI answer");
   const [note, setNote] = useState(draft._metadata?.note || "");
   const [tags, setTags] = useState((draft._metadata?.tags || [platformLabel(draft.platform)]).join(", "));
   const [saving, setSaving] = useState(false);
-  const confirm = () => { setSaving(true); onConfirm({ ...draft, question }, { title, note, tags: tags.split(",").map((tag) => tag.trim()).filter(Boolean) }); };
+  const confirm = async () => {
+    if (saving) return;
+    setSaving(true);
+    try {
+      const saved = await onConfirm({ ...draft, question }, { title, note, tags: tags.split(",").map((tag) => tag.trim()).filter(Boolean) });
+      if (!saved) setSaving(false);
+    } catch {
+      setSaving(false);
+    }
+  };
   return <div className="modal-backdrop"><section className="import-modal" role="dialog" aria-modal="true" aria-labelledby="import-title"><div className="modal-header"><div><div className="eyebrow">CAPTURE PREVIEW</div><h2 id="import-title">保存到 AnswerFrame</h2><p>先确认截图、问题和来源清单，再上传到你的私有库。</p></div><button className="icon-button" onClick={onCancel} aria-label="取消"><X size={19} /></button></div><div className="import-preview-grid"><div className="preview-shot"><ResolvedImage path={draft.screenshotParts[0]?.dataUrl} alt="回答截图预览" /><span className="preview-pages">{draft.screenshotParts.length} page{draft.screenshotParts.length > 1 ? "s" : ""}</span></div><div className="preview-meta"><label>标题<input value={title} onChange={(event) => setTitle(event.target.value)} /></label><label>用户问题<textarea rows={4} value={question} onChange={(event) => setQuestion(event.target.value)} /></label><label>笔记<textarea rows={2} value={note} onChange={(event) => setNote(event.target.value)} placeholder="稍后要继续聊什么？" /></label><label>标签<input value={tags} onChange={(event) => setTags(event.target.value)} /></label></div></div><div className="preview-links"><div className="preview-links-heading"><span><Link2 size={16} />检测到 {draft.links.length} 个来源</span><small>链接会在上传后异步检查</small></div>{draft.links.length === 0 ? <div className="unresolved-empty">未发现可解析链接；回答中的无 URL 引用仍会保留。</div> : <div className="preview-link-list">{draft.links.map((link) => <div key={link.id} className="preview-link-row"><span className={`source-icon source-${link.kind}`}>{link.kind === "youtube" ? <Youtube size={14} /> : <Link2 size={14} />}</span><span>{link.label}</span><small>{link.url || "需要补充 URL"}</small><span className={`status-chip ${statusTone(link.status)}`}><span />{linkStatusLabel(link.status)}</span></div>)}</div>}</div><div className="modal-footer"><span><ShieldCheck size={15} />只会上传截图和元数据，不上传视频或论文正文</span><div><button className="button button-quiet" onClick={onCancel}>取消</button><button className="button button-primary" onClick={confirm} disabled={saving}>{saving ? "上传中…" : <><Upload size={16} />确认并保存</>}</button></div></div></section></div>;
 }
 
