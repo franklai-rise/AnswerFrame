@@ -110,11 +110,14 @@ npm run build:extension
 In Chrome, open `chrome://extensions`, enable Developer mode, and choose
 **Load unpacked** → `apps/extension/dist`. The daily-start helper keeps the
 local web app available at `http://localhost:5173`; no terminal needs to remain
-open. If the extension was just reloaded, refresh each already-open AI tab once.
+open. Whenever the extension is rebuilt, click **Reload** on its card and
+refresh each already-open AI tab once. Version 0.2.1 temporarily uses Chrome's
+local unlimited extension storage while handing a screenshot to the library;
+the temporary transfer is removed as soon as the library preview confirms it.
 The extension declares only ChatGPT and Gemini web pages (plus the local
-development bridge), `storage`, `offscreen`, and temporary `activeTab` capture
-access; it does not ask for all-site access, cookies, history, or debugger
-access.
+development bridge), local `storage`/`unlimitedStorage`, `offscreen`, and
+temporary `activeTab` capture access; it does not ask for all-site access,
+cookies, history, or debugger access.
 
 On a ChatGPT or Gemini page, each detected assistant/model answer receives
 **Save to AnswerFrame**. The capture flow temporarily hides controls, captures
@@ -123,7 +126,9 @@ and focus in `finally`, then opens an in-page preview. Only after confirmation
 does the extension open the library and forward the draft. After the database
 write completes, the library shows a persistent **保存成功** confirmation with
 the saved title and a direct **查看详情** action; a failed write leaves the
-preview open so it can be retried. Gemini source links
+preview open so it can be retried. The first button visibly changes to
+**正在截取回答…** and errors appear in a fixed toast on the AI page, so a failed
+handoff is no longer silent. Gemini source links
   found in the answer and in its Sources panel are merged and de-duplicated while
   retaining a `sourceSurface` marker.
 

@@ -1,14 +1,23 @@
+import { createDraftTransfer, DRAFT_TRANSFER_KEY, isDraftTransfer } from "./draft-transfer";
+
 const APP_URL = "http://localhost:5173";
 let lastCaptureAt = 0;
-const pendingForward = new Map<number, unknown>();
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.type === "capture-visible") {
     void captureVisible(sender.tab?.windowId).then(sendResponse).catch((error) => sendResponse({ error: error instanceof Error ? error.message : String(error) }));
     return true;
   }
+  if (message?.type === "open-library-transfer") {
+    void openLibraryWithTransfer(String(message.transferId || "")).then(() => sendResponse({ ok: true })).catch((error) => sendResponse({ error: error instanceof Error ? error.message : String(error) }));
+    return true;
+  }
+  // Keeps already-open AI tabs from older extension code working after the
+  // service worker has been reloaded. Fresh content scripts use the durable,
+  // storage-backed transfer above so screenshots never need a second large
+  // runtime-message hop.
   if (message?.type === "open-library-with-draft") {
-    void openLibraryWithDraft(message.draft).then(() => sendResponse({ ok: true })).catch((error) => sendResponse({ error: error instanceof Error ? error.message : String(error) }));
+    void storeAndOpenLibrary(message.draft).then(() => sendResponse({ ok: true })).catch((error) => sendResponse({ error: error instanceof Error ? error.message : String(error) }));
     return true;
   }
   if (message?.type === "auth-google") {
@@ -31,28 +40,51 @@ async function captureVisible(windowId?: number): Promise<{ dataUrl?: string; er
   }
 }
 
-async function openLibraryWithDraft(draft: unknown): Promise<void> {
-  const tab = await chrome.tabs.create({ url: `${APP_URL}/import?from=extension` });
+async function storeAndOpenLibrary(draft: unknown): Promise<void> {
+  const transfer = createDraftTransfer(draft);
+  await chrome.storage.local.set({ [DRAFT_TRANSFER_KEY]: transfer });
+  await openLibraryWithTransfer(transfer.id);
+}
+
+async function openLibraryWithTransfer(transferId: string): Promise<void> {
+  if (!transferId) throw new Error("保存草稿标识缺失，请重新点击确认");
+  const stored = await chrome.storage.local.get(DRAFT_TRANSFER_KEY);
+  if (!isDraftTransfer(stored[DRAFT_TRANSFER_KEY], transferId)) throw new Error("保存草稿已过期，请重新点击确认");
+  const tab = await chrome.tabs.create({ url: `${APP_URL}/import?from=extension&draftId=${encodeURIComponent(transferId)}` });
   if (typeof tab.id !== "number") throw new Error("无法打开 AnswerFrame 网页");
-  pendingForward.set(tab.id, draft);
-  const delivered = await forwardDraft(tab.id);
+  await waitForTabLoad(tab.id);
+  const delivered = await forwardStoredDraft(tab.id, transferId);
   if (!delivered) throw new Error("AnswerFrame 网页未确认收到草稿，请确认 localhost:5173 正在运行后重试");
 }
 
-async function forwardDraft(tabId: number): Promise<boolean> {
-  const value = pendingForward.get(tabId);
-  if (value === undefined) return false;
-  for (let attempt = 0; attempt < 8; attempt += 1) {
+async function waitForTabLoad(tabId: number): Promise<void> {
+  const tab = await chrome.tabs.get(tabId);
+  if (tab.status === "complete") return;
+  await new Promise<void>((resolve) => {
+    const timeout = setTimeout(() => {
+      chrome.tabs.onUpdated.removeListener(onUpdated);
+      resolve();
+    }, 8_000);
+    const onUpdated = (updatedTabId: number, changeInfo: chrome.tabs.TabChangeInfo) => {
+      if (updatedTabId !== tabId || changeInfo.status !== "complete") return;
+      clearTimeout(timeout);
+      chrome.tabs.onUpdated.removeListener(onUpdated);
+      resolve();
+    };
+    chrome.tabs.onUpdated.addListener(onUpdated);
+  });
+}
+
+async function forwardStoredDraft(tabId: number, transferId: string): Promise<boolean> {
+  for (let attempt = 0; attempt < 12; attempt += 1) {
     try {
-      const response = await chrome.tabs.sendMessage(tabId, { type: "answerframe:forward-draft", draft: value }) as { ok?: boolean; error?: string } | undefined;
+      const response = await chrome.tabs.sendMessage(tabId, { type: "answerframe:forward-stored-draft", transferId }) as { ok?: boolean; error?: string } | undefined;
       if (!response?.ok) throw new Error(response?.error || "AnswerFrame 网页尚未确认草稿");
-      pendingForward.delete(tabId);
       return true;
     } catch {
-      await new Promise((resolve) => setTimeout(resolve, 500));
+      await new Promise((resolve) => setTimeout(resolve, 350));
     }
   }
-  pendingForward.delete(tabId);
   return false;
 }
 

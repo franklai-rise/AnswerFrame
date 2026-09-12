@@ -2,9 +2,9 @@
   "manifest_version": 3,
   "name": "AnswerFrame: Save AI Answers & Sources",
   "description": "Capture ChatGPT or Gemini answers, keep the question, and collect source links in your private AnswerFrame library.",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "minimum_chrome_version": "109",
-  "permissions": ["storage", "offscreen", "activeTab"],
+  "permissions": ["storage", "unlimitedStorage", "offscreen", "activeTab"],
   "host_permissions": [
     "https://chatgpt.com/*",
     "https://*.chatgpt.com/*",
