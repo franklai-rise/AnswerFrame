@@ -1,9 +1,10 @@
-import { useEffect, useMemo, useState, type ChangeEvent, type FormEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type FormEvent, type ReactNode } from "react";
 import {
   Archive,
   ArrowLeft,
   BookOpen,
   Check,
+  ChevronLeft,
   ChevronRight,
   CircleHelp,
   ExternalLink,
@@ -15,6 +16,7 @@ import {
   LogIn,
   LogOut,
   Menu,
+  Maximize2,
   MoreHorizontal,
   Plus,
   RotateCcw,
@@ -27,6 +29,8 @@ import {
   Upload,
   X,
   Youtube,
+  ZoomIn,
+  ZoomOut,
 } from "lucide-react";
 import {
   classifyLink,
@@ -44,14 +48,19 @@ import {
   type ScreenshotPart,
 } from "@answerframe/shared";
 import { hasOwnerClaim, firebaseEnabled, signInWithGoogle, signOutAnswerFrame, subscribeToAuth, type User } from "./lib/firebase";
-import { createRepository, resolveImageUrl, type ClipRepository } from "./lib/repository";
+import { createRepository, isNativeLibraryPage, resolveImageUrl, type ClipRepository } from "./lib/repository";
 
 type Route = "library" | "trash" | "settings" | "detail";
 type ViewMode = "grid" | "list";
 type SaveConfirmation = { id: string; title: string };
 
+function locationPath(): string {
+  if (isNativeLibraryPage()) return window.location.hash.replace(/^#/, "") || "/library";
+  return window.location.pathname;
+}
+
 const routeFromLocation = (): Route => {
-  const path = window.location.pathname;
+  const path = locationPath();
   if (path === "/trash") return "trash";
   if (path === "/settings") return "settings";
   if (path.startsWith("/clip/")) return "detail";
@@ -70,6 +79,10 @@ function formatDate(value: ClipRecord["createdAt"]): string {
 }
 
 function navigate(path: string): void {
+  if (isNativeLibraryPage()) {
+    window.location.hash = path;
+    return;
+  }
   window.history.pushState({}, "", path);
   window.dispatchEvent(new PopStateEvent("popstate"));
 }
@@ -96,13 +109,14 @@ function statusTone(status: LinkStatus): string {
 }
 
 function App() {
+  const nativeLibrary = isNativeLibraryPage();
   const [route, setRoute] = useState<Route>(routeFromLocation);
   const [user, setUser] = useState<User | null>(null);
   const [ownerAllowed, setOwnerAllowed] = useState(false);
   const [repo, setRepo] = useState<ClipRepository>(() => createRepository());
   const [clips, setClips] = useState<ClipRecord[]>([]);
   const [trash, setTrash] = useState<ClipRecord[]>([]);
-  const [selectedId, setSelectedId] = useState(() => window.location.pathname.split("/").pop() || "");
+  const [selectedId, setSelectedId] = useState(() => locationPath().split("/").pop() || "");
   const [viewMode, setViewMode] = useState<ViewMode>("grid");
   const [query, setQuery] = useState("");
   const [platformFilter, setPlatformFilter] = useState<Platform | "all">("all");
@@ -112,6 +126,7 @@ function App() {
   const [saveConfirmation, setSaveConfirmation] = useState<SaveConfirmation | null>(null);
   const [importDraft, setImportDraft] = useState<PendingDraft | null>(null);
   const [mobileMenu, setMobileMenu] = useState(false);
+  const autoSaveTransferIds = useRef(new Set<string>());
 
   const notify = (message: string) => {
     setToast(message);
@@ -128,7 +143,14 @@ function App() {
     }
   };
 
-  useEffect(() => subscribeToAuth((nextUser) => {
+  useEffect(() => {
+    if (nativeLibrary) {
+      setUser(null);
+      setOwnerAllowed(false);
+      setRepo(createRepository());
+      return () => undefined;
+    }
+    return subscribeToAuth((nextUser) => {
     setUser(nextUser);
     void hasOwnerClaim(nextUser).catch(() => false).then((allowed) => {
       setOwnerAllowed(allowed);
@@ -136,7 +158,8 @@ function App() {
       setRepo(nextRepo);
       void reload(nextRepo);
     });
-  }), []);
+    });
+  }, [nativeLibrary]);
 
   useEffect(() => {
     void reload();
@@ -145,23 +168,11 @@ function App() {
   useEffect(() => {
     const onPopState = () => {
       setRoute(routeFromLocation());
-      setSelectedId(window.location.pathname.split("/").pop() || "");
+      setSelectedId(locationPath().split("/").pop() || "");
     };
     window.addEventListener("popstate", onPopState);
-    return () => window.removeEventListener("popstate", onPopState);
-  }, []);
-
-  useEffect(() => {
-    const onMessage = (event: MessageEvent) => {
-      if (event.origin !== window.location.origin || event.data?.type !== "answerframe:draft") return;
-      const draft = event.data.draft as CaptureDraft & { _metadata?: { title?: string; note?: string; tags?: string[] } };
-      if ((draft?.platform === "chatgpt" || draft?.platform === "gemini") && Array.isArray(draft.screenshotParts)) {
-        setImportDraft(draft);
-        if (event.data?.requestId) window.postMessage({ type: "answerframe:draft-ack", requestId: event.data.requestId }, window.location.origin);
-      }
-    };
-    window.addEventListener("message", onMessage);
-    return () => window.removeEventListener("message", onMessage);
+    window.addEventListener("hashchange", onPopState);
+    return () => { window.removeEventListener("popstate", onPopState); window.removeEventListener("hashchange", onPopState); };
   }, []);
 
   const selectedClip = clips.find((clip) => clip.id === selectedId) || trash.find((clip) => clip.id === selectedId) || null;
@@ -176,7 +187,7 @@ function App() {
     });
   }, [clips, query, platformFilter, tagFilter, kindFilter]);
 
-  const saveDraft = async (draft: CaptureDraft, metadata: { title?: string; note?: string; tags?: string[] }): Promise<boolean> => {
+  const saveDraft = useCallback(async (draft: CaptureDraft, metadata: { title?: string; note?: string; tags?: string[] }, transferId?: string): Promise<boolean> => {
     setSaveConfirmation(null);
     try {
       const record = await repo.saveDraft(draft, metadata);
@@ -186,12 +197,34 @@ function App() {
       navigate(`/clip/${record.id}`);
       setSaveConfirmation({ id: record.id, title: record.title });
       notify("已保存到 AnswerFrame");
+      if (transferId) window.postMessage({ type: "answerframe:save-result", transferId, ok: true, clipId: record.id }, window.location.origin);
       return true;
     } catch (error) {
-      notify(error instanceof Error ? error.message : "上传失败，未产生半成品记录");
+      const message = error instanceof Error ? error.message : "上传失败，未产生半成品记录";
+      notify(message);
+      if (transferId) window.postMessage({ type: "answerframe:save-result", transferId, ok: false, error: message }, window.location.origin);
       return false;
     }
-  };
+  }, [repo]);
+
+  useEffect(() => {
+    const onMessage = (event: MessageEvent) => {
+      if (event.origin !== window.location.origin || event.data?.type !== "answerframe:draft") return;
+      const draft = event.data.draft as CaptureDraft & { _metadata?: { title?: string; note?: string; tags?: string[] } };
+      if ((draft?.platform !== "chatgpt" && draft?.platform !== "gemini") || !Array.isArray(draft.screenshotParts)) return;
+      if (event.data?.requestId) window.postMessage({ type: "answerframe:draft-ack", requestId: event.data.requestId }, window.location.origin);
+      const transferId = typeof event.data?.transferId === "string" ? event.data.transferId : "";
+      if (event.data?.autoSave === true && transferId) {
+        if (autoSaveTransferIds.current.has(transferId)) return;
+        autoSaveTransferIds.current.add(transferId);
+        void saveDraft(draft, draft._metadata || {}, transferId);
+        return;
+      }
+      setImportDraft(draft);
+    };
+    window.addEventListener("message", onMessage);
+    return () => window.removeEventListener("message", onMessage);
+  }, [saveDraft]);
 
   const updateClip = async (id: string, patch: ClipPatch) => {
     try {
@@ -231,13 +264,17 @@ function App() {
     try {
       await repo.recheckLinks(id);
       await reload();
-      notify(firebaseEnabled ? "已请求重新检查来源" : "Demo 模式已标记来源待检查；连接 Firebase 后会执行网络验证");
+      notify(firebaseEnabled && !nativeLibrary ? "已请求重新检查来源" : "已标记来源待检查；当前本地库不访问外部链接");
     } catch (error) {
       notify(error instanceof Error ? error.message : "链接检查失败");
     }
   };
 
   const signIn = async () => {
+    if (nativeLibrary) {
+      notify("扩展原生资料库不需要登录，也不会上传到云端");
+      return;
+    }
     if (!firebaseEnabled) {
       notify("当前是 Demo 模式；配置 Firebase 后即可 Google 登录");
       return;
@@ -257,17 +294,17 @@ function App() {
           <button className="icon-button mobile-only" aria-label="打开菜单" onClick={() => setMobileMenu(true)}><Menu size={19} /></button>
           <div className="topbar-search"><Search size={17} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索标题、问题、标签或链接…" /></div>
           <div className="topbar-actions">
-            <span className={`mode-pill ${firebaseEnabled && ownerAllowed ? "cloud" : "demo"}`}><span className="mode-dot" />{firebaseEnabled && ownerAllowed ? "Cloud library" : "Demo mode"}</span>
-            {user ? <button className="account-button" onClick={() => void signOutAnswerFrame()} title="退出登录"><span className="avatar">{(user.displayName || user.email || "A").slice(0, 1).toUpperCase()}</span><span className="account-name">{user.displayName || user.email}</span><LogOut size={15} /></button> : <button className="button button-quiet" onClick={() => void signIn()}><LogIn size={16} />Google 登录</button>}
+            <span className={`mode-pill ${firebaseEnabled && ownerAllowed && !nativeLibrary ? "cloud" : "demo"}`}><span className="mode-dot" />{nativeLibrary ? "Local extension library" : firebaseEnabled && ownerAllowed ? "Cloud library" : "Demo mode"}</span>
+            {!nativeLibrary && (user ? <button className="account-button" onClick={() => void signOutAnswerFrame()} title="退出登录"><span className="avatar">{(user.displayName || user.email || "A").slice(0, 1).toUpperCase()}</span><span className="account-name">{user.displayName || user.email}</span><LogOut size={15} /></button> : <button className="button button-quiet" onClick={() => void signIn()}><LogIn size={16} />Google 登录</button>)}
           </div>
         </header>
-        {!firebaseEnabled && <div className="demo-banner"><Sparkles size={16} />这是可安全试用的本地 Demo；截图保存在当前浏览器的 IndexedDB 中。填入 <code>VITE_FIREBASE_*</code> 后，确认保存会上传到你的私有 Firebase 项目。</div>}
+        {nativeLibrary ? <div className="demo-banner"><ShieldCheck size={16} />扩展原生资料库：不需要运行 localhost 或终端。截图和元数据仅保存在这个 Chrome 配置文件中。</div> : !firebaseEnabled && <div className="demo-banner"><Sparkles size={16} />这是可安全试用的本地 Demo；截图保存在当前浏览器的 IndexedDB 中。填入 <code>VITE_FIREBASE_*</code> 后，确认保存会上传到你的私有 Firebase 项目。</div>}
         <main className="content-area">
-          {route === "library" && <LibraryPage clips={filteredClips} allPlatforms={allPlatforms} platformFilter={platformFilter} setPlatformFilter={setPlatformFilter} allTags={allTags} allKinds={allKinds} tagFilter={tagFilter} kindFilter={kindFilter} setTagFilter={setTagFilter} setKindFilter={setKindFilter} viewMode={viewMode} setViewMode={setViewMode} onOpen={(id) => { setSelectedId(id); navigate(`/clip/${id}`); }} />}
+          {route === "library" && <LibraryPage nativeLibrary={nativeLibrary} clips={filteredClips} allPlatforms={allPlatforms} platformFilter={platformFilter} setPlatformFilter={setPlatformFilter} allTags={allTags} allKinds={allKinds} tagFilter={tagFilter} kindFilter={kindFilter} setTagFilter={setTagFilter} setKindFilter={setKindFilter} viewMode={viewMode} setViewMode={setViewMode} onOpen={(id) => { setSelectedId(id); navigate(`/clip/${id}`); }} />}
           {route === "detail" && selectedClip && <DetailPage clip={selectedClip} repo={repo} onBack={() => navigate("/library")} onUpdate={updateClip} onDelete={() => void deleteClip(selectedClip.id)} onRecheck={() => void recheckLinks(selectedClip.id)} onNotify={notify} />}
           {route === "detail" && !selectedClip && <EmptyState icon={<CircleHelp />} title="找不到这条收藏" actionLabel="回到收藏库" onAction={() => navigate("/library")} />}
           {route === "trash" && <TrashPage clips={trash} onRestore={(id) => void restoreClip(id)} onPurge={(id) => void deleteClip(id, true)} />}
-          {route === "settings" && <SettingsPage user={user} ownerAllowed={ownerAllowed} firebaseReady={firebaseEnabled} onSignIn={() => void signIn()} />}
+          {route === "settings" && <SettingsPage nativeLibrary={nativeLibrary} user={user} ownerAllowed={ownerAllowed} firebaseReady={firebaseEnabled} onSignIn={() => void signIn()} />}
         </main>
       </div>
       {importDraft && <ImportModal draft={importDraft} onCancel={() => setImportDraft(null)} onConfirm={(draft, metadata) => saveDraft(draft, metadata)} />}
@@ -291,9 +328,9 @@ function Sidebar({ route, mobileMenu, onNavigate, onClose }: { route: Route; mob
     <div className="sidebar-section-label">WORKSPACE</div>
     <nav className="secondary-nav">
       <NavButton active={route === "settings"} icon={<Settings size={17} />} label="设置" onClick={() => onNavigate("settings")} />
-      <NavButton active={false} icon={<CircleHelp size={17} />} label="使用说明" onClick={() => window.open("https://github.com/", "_blank", "noopener,noreferrer")} />
+      <NavButton active={false} icon={<CircleHelp size={17} />} label="使用说明" onClick={() => window.open("https://github.com/franklai-rise/AnswerFrame", "_blank", "noopener,noreferrer")} />
     </nav>
-    <div className="sidebar-bottom"><div className="privacy-note"><ShieldCheck size={16} /><span><strong>Private by default</strong><br />你的回答只属于你的账号</span></div><div className="version-label">AnswerFrame v0.2 · Capture the answer.</div></div>
+    <div className="sidebar-bottom"><div className="privacy-note"><ShieldCheck size={16} /><span><strong>Private by default</strong><br />你的回答只属于你的资料库</span></div><div className="version-label">AnswerFrame v0.3.3 · Capture the answer.</div></div>
   </aside>;
 }
 
@@ -301,9 +338,9 @@ function NavButton({ active, icon, label, count, onClick }: { active: boolean; i
   return <button className={`nav-button ${active ? "active" : ""}`} onClick={onClick}>{icon}<span>{label}</span>{typeof count === "number" && <span className="nav-count">{count}</span>}</button>;
 }
 
-function LibraryPage({ clips, allPlatforms, platformFilter, setPlatformFilter, allTags, allKinds, tagFilter, kindFilter, setTagFilter, setKindFilter, viewMode, setViewMode, onOpen }: { clips: ClipRecord[]; allPlatforms: Platform[]; platformFilter: Platform | "all"; setPlatformFilter: (value: Platform | "all") => void; allTags: string[]; allKinds: LinkKind[]; tagFilter: string; kindFilter: string; setTagFilter: (value: string) => void; setKindFilter: (value: string) => void; viewMode: ViewMode; setViewMode: (value: ViewMode) => void; onOpen: (id: string) => void }) {
+function LibraryPage({ nativeLibrary, clips, allPlatforms, platformFilter, setPlatformFilter, allTags, allKinds, tagFilter, kindFilter, setTagFilter, setKindFilter, viewMode, setViewMode, onOpen }: { nativeLibrary: boolean; clips: ClipRecord[]; allPlatforms: Platform[]; platformFilter: Platform | "all"; setPlatformFilter: (value: Platform | "all") => void; allTags: string[]; allKinds: LinkKind[]; tagFilter: string; kindFilter: string; setTagFilter: (value: string) => void; setKindFilter: (value: string) => void; viewMode: ViewMode; setViewMode: (value: ViewMode) => void; onOpen: (id: string) => void }) {
   return <>
-    <div className="page-heading"><div><div className="eyebrow">YOUR COLLECTION</div><h1>收藏库</h1><p>把值得再次阅读的 AI 回答，连同它的上下文和来源放在一起。</p></div><button className="button button-primary" onClick={() => window.open("http://localhost:5173/import", "_blank")}><Plus size={17} />从扩展导入</button></div>
+    <div className="page-heading"><div><div className="eyebrow">YOUR COLLECTION</div><h1>收藏库</h1><p>把值得再次阅读的 AI 回答，连同它的上下文和来源放在一起。</p></div>{!nativeLibrary && <button className="button button-primary" onClick={() => window.open("/import", "_blank")}><Plus size={17} />从扩展导入</button>}</div>
     <div className="toolbar"><div className="filter-group"><div className="filter-control"><Sparkles size={15} /><select aria-label="平台筛选" value={platformFilter} onChange={(event) => setPlatformFilter(event.target.value as Platform | "all")}><option value="all">所有平台</option>{allPlatforms.map((platform) => <option key={platform} value={platform}>{platformLabel(platform)}</option>)}</select></div><div className="filter-control"><Filter size={15} /><select aria-label="标签筛选" value={tagFilter} onChange={(event) => setTagFilter(event.target.value)}><option value="all">所有标签</option>{allTags.map((tag) => <option key={tag} value={tag}>{tag}</option>)}</select></div><div className="filter-control"><Link2 size={15} /><select aria-label="链接类型筛选" value={kindFilter} onChange={(event) => setKindFilter(event.target.value)}><option value="all">所有来源</option>{allKinds.map((kind) => <option key={kind} value={kind}>{kindLabel(kind)}</option>)}</select></div></div><div className="view-switcher"><button className={viewMode === "grid" ? "selected" : ""} onClick={() => setViewMode("grid")} aria-label="卡片网格"><Grid2X2 size={17} /></button><button className={viewMode === "list" ? "selected" : ""} onClick={() => setViewMode("list")} aria-label="紧凑列表"><List size={18} /></button></div></div>
     {clips.length === 0 ? <EmptyState icon={<Archive />} title="还没有匹配的收藏" description="试试清空搜索和筛选，或在 ChatGPT / Gemini 回答下方点击 Save to AnswerFrame。" /> : viewMode === "grid" ? <div className="clip-grid">{clips.map((clip) => <ClipCard key={clip.id} clip={clip} onOpen={onOpen} />)}</div> : <div className="clip-list">{clips.map((clip) => <ClipListRow key={clip.id} clip={clip} onOpen={onOpen} />)}</div>}
   </>;
@@ -328,6 +365,7 @@ function DetailPage({ clip, repo, onBack, onUpdate, onDelete, onRecheck, onNotif
 function VisualSourceRail({ clip }: { clip: ClipRecord }) {
   const [hovered, setHovered] = useState<string | null>(null);
   const [activePart, setActivePart] = useState(0);
+  const [lightboxOpen, setLightboxOpen] = useState(false);
   const part = clip.imageParts[activePart] || clip.imageParts[0];
   const screenshotHeight = 620;
   const railItems = useMemo(() => layoutSourceRail(clip.links.filter((link) => link.pageIndex === activePart), screenshotHeight, 82, 14), [clip.links, activePart]);
@@ -342,16 +380,64 @@ function VisualSourceRail({ clip }: { clip: ClipRecord }) {
 
   return <section className="visual-section">
     <div className="visual-heading">
-      <div><div className="section-kicker">CAPTURED ANSWER</div><p>原始截图与来源位置对应。悬停来源卡片查看它在回答中的位置。</p></div>
+      <div><div className="section-kicker">CAPTURED Q&amp;A</div><p>点击截图可放大，滚轮缩放并拖拽查看；悬停来源卡片可定位链接。</p></div>
       {clip.imageParts.length > 1 && <div className="part-switcher">{clip.imageParts.map((image, index) => <button className={activePart === index ? "active" : ""} key={image.path} onClick={() => setActivePart(index)}>第 {index + 1} 页</button>)}</div>}
     </div>
     <div className="visual-shell">
-      <div className="screenshot-stage"><ResolvedImage path={part?.path} alt="AI 回答截图" /><div className="hover-highlight" style={highlightStyle} /></div>
+      <div className="screenshot-stage zoomable" role="button" tabIndex={0} aria-label={`放大查看第 ${activePart + 1} 页截图`} onClick={() => setLightboxOpen(true)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); setLightboxOpen(true); } }}><ResolvedImage path={part?.path} alt="AI 问答截图" /><div className="hover-highlight" style={highlightStyle} /><span className="zoom-hint"><ZoomIn size={15} />点击放大</span></div>
       <div className="rail-column"><div className="rail-label"><span />SOURCE RAIL</div><div className="source-rail" style={{ minHeight: `${screenshotHeight}px` }}>{railItems.map((item) => <SourceCard item={item} key={item.id} hovered={hovered === item.id} onHover={() => setHovered(item.id)} onLeave={() => setHovered(null)} />)}</div></div>
       <svg className="connector-layer" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">{hoveredSource && hoveredItem && <path d={`M ${Math.min((hoveredSource.anchor.x + hoveredSource.anchor.width) * 100, 98)} ${(hoveredSource.anchor.y + Math.max(hoveredSource.anchor.height, .012) / 2) * 100} C 74 ${(hoveredSource.anchor.y + Math.max(hoveredSource.anchor.height, .012) / 2) * 100}, 77 ${(hoveredItem.railTop + 41) / screenshotHeight * 100}, 100 ${(hoveredItem.railTop + 41) / screenshotHeight * 100}`} />}</svg>
     </div>
     <div className="mobile-source-list">{clip.links.map((item) => <SourceCard item={{ ...item, railTop: 0, collisionOffset: 0 }} key={item.id} hovered={false} onHover={() => undefined} onLeave={() => undefined} />)}</div>
+    {lightboxOpen && <ImageLightbox paths={clip.imageParts.map((image) => image.path)} initialIndex={activePart} onPageChange={setActivePart} onClose={() => setLightboxOpen(false)} />}
   </section>;
+}
+
+function ImageLightbox({ paths, initialIndex, onPageChange, onClose }: { paths: string[]; initialIndex: number; onPageChange?: (index: number) => void; onClose: () => void }) {
+  const [index, setIndex] = useState(initialIndex);
+  const [scale, setScale] = useState(1);
+  const [offset, setOffset] = useState({ x: 0, y: 0 });
+  const drag = useRef<{ pointerId: number; x: number; y: number; originX: number; originY: number } | null>(null);
+  const reset = useCallback(() => { setScale(1); setOffset({ x: 0, y: 0 }); }, []);
+  const changePage = (next: number) => {
+    const bounded = Math.max(0, Math.min(paths.length - 1, next));
+    setIndex(bounded);
+    onPageChange?.(bounded);
+    reset();
+  };
+  const changeScale = (next: number) => setScale(Math.max(.5, Math.min(6, next)));
+
+  useEffect(() => {
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+      else if (event.key === "+" || event.key === "=") changeScale(scale * 1.2);
+      else if (event.key === "-") changeScale(scale / 1.2);
+      else if (event.key === "0") reset();
+      else if (event.key === "ArrowLeft" && paths.length > 1) changePage(index - 1);
+      else if (event.key === "ArrowRight" && paths.length > 1) changePage(index + 1);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => { document.body.style.overflow = previousOverflow; window.removeEventListener("keydown", onKeyDown); };
+  }, [index, onClose, paths.length, reset, scale]);
+
+  return <div className="image-lightbox" role="dialog" aria-modal="true" aria-label="截图大图查看器" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
+    <div className="lightbox-toolbar">
+      <span>第 {index + 1} / {paths.length} 页 · {Math.round(scale * 100)}%</span>
+      <div>
+        <button onClick={() => changeScale(scale / 1.2)} aria-label="缩小"><ZoomOut size={18} /></button>
+        <button onClick={reset} aria-label="恢复适合窗口"><Maximize2 size={17} /></button>
+        <button onClick={() => changeScale(scale * 1.2)} aria-label="放大"><ZoomIn size={18} /></button>
+        <button onClick={onClose} aria-label="关闭"><X size={20} /></button>
+      </div>
+    </div>
+    <div className={`lightbox-canvas ${drag.current ? "dragging" : ""}`} onWheel={(event) => { event.preventDefault(); changeScale(scale * (event.deltaY < 0 ? 1.12 : .89)); }} onDoubleClick={reset} onPointerDown={(event) => { drag.current = { pointerId: event.pointerId, x: event.clientX, y: event.clientY, originX: offset.x, originY: offset.y }; event.currentTarget.setPointerCapture(event.pointerId); }} onPointerMove={(event) => { const current = drag.current; if (!current || current.pointerId !== event.pointerId) return; setOffset({ x: current.originX + event.clientX - current.x, y: current.originY + event.clientY - current.y }); }} onPointerUp={(event) => { if (drag.current?.pointerId === event.pointerId) drag.current = null; event.currentTarget.releasePointerCapture(event.pointerId); }} onPointerCancel={() => { drag.current = null; }}>
+      <div className="lightbox-image" style={{ transform: `translate3d(${offset.x}px,${offset.y}px,0) scale(${scale})` }}><ResolvedImage path={paths[index]} alt={`问答截图第 ${index + 1} 页`} /></div>
+    </div>
+    {paths.length > 1 && <><button className="lightbox-page previous" disabled={index === 0} onClick={() => changePage(index - 1)} aria-label="上一页"><ChevronLeft size={25} /></button><button className="lightbox-page next" disabled={index === paths.length - 1} onClick={() => changePage(index + 1)} aria-label="下一页"><ChevronRight size={25} /></button></>}
+    <div className="lightbox-help">滚轮缩放 · 拖拽移动 · 双击复位 · Esc 关闭</div>
+  </div>;
 }
 
 function SourceCard({ item, hovered, onHover, onLeave }: { item: RailItem; hovered: boolean; onHover: () => void; onLeave: () => void }) {
@@ -395,8 +481,15 @@ function TrashPage({ clips, onRestore, onPurge }: { clips: ClipRecord[]; onResto
   </>;
 }
 
-function SettingsPage({ user, ownerAllowed, firebaseReady, onSignIn }: { user: User | null; ownerAllowed: boolean; firebaseReady: boolean; onSignIn: () => void }) {
-  return <><div className="page-heading"><div><div className="eyebrow">WORKSPACE</div><h1>设置</h1><p>控制登录、云端连接和扩展导入行为。</p></div></div><div className="settings-grid"><section className="settings-card"><div className="settings-card-icon"><ShieldCheck size={18} /></div><div><h2>隐私与账号</h2><p>{firebaseReady ? "Google 登录已配置。只有带 answerframeOwner 权限的账号可以读取收藏。" : "当前未配置 Firebase，网页使用浏览器本地 IndexedDB 保存截图和元数据。"}</p>{user ? <div className="settings-account"><span className="avatar large">{(user.displayName || user.email || "A").slice(0, 1).toUpperCase()}</span><div><strong>{user.displayName || "Google account"}</strong><span>{user.email}</span></div><span className={`claim-badge ${ownerAllowed ? "ok" : "pending"}`}>{ownerAllowed ? "Owner enabled" : "等待 owner claim"}</span></div> : <button className="button button-primary" onClick={onSignIn}><LogIn size={16} />使用 Google 登录</button>}</div></section><section className="settings-card"><div className="settings-card-icon"><Upload size={18} /></div><div><h2>Chrome 扩展</h2><p>在 ChatGPT 或 Gemini assistant 回答下方出现 Save to AnswerFrame。确认预览后，扩展会打开此网页完成导入。</p><div className="install-steps"><span>1</span><div>进入 <code>apps/extension/dist</code>，在 Chrome 扩展页开启“开发者模式”并加载已解压扩展。</div><span>2</span><div>将 AnswerFrame 地址设置为当前网页地址。</div></div></div></section><section className="settings-card wide"><div className="settings-card-icon"><CircleHelp size={18} /></div><div><h2>开发状态</h2><div className="status-table"><div><span>Web app</span><b className="ready-dot">Ready</b></div><div><span>Firebase</span><b className={firebaseReady ? "ready-dot" : "muted-dot"}>{firebaseReady ? "Configured" : "Demo mode"}</b></div><div><span>Link validator</span><b className="muted-dot">Emulator scaffold</b></div><div><span>Chrome Web Store</span><b className="muted-dot">Not published</b></div></div></div></section></div></>;
+function SettingsPage({ nativeLibrary, user, ownerAllowed, firebaseReady, onSignIn }: { nativeLibrary: boolean; user: User | null; ownerAllowed: boolean; firebaseReady: boolean; onSignIn: () => void }) {
+  return <>
+    <div className="page-heading"><div><div className="eyebrow">WORKSPACE</div><h1>设置</h1><p>{nativeLibrary ? "管理扩展本机资料库和保存方式。" : "控制登录、云端连接和扩展导入行为。"}</p></div></div>
+    <div className="settings-grid">
+      <section className="settings-card"><div className="settings-card-icon"><ShieldCheck size={18} /></div><div><h2>隐私与账号</h2><p>{nativeLibrary ? "这个版本不需要 Google 登录。截图、问题、文本和链接都只保存在当前 Chrome 配置文件的扩展 IndexedDB 中。" : firebaseReady ? "Google 登录已配置。只有带 answerframeOwner 权限的账号可以读取收藏。" : "当前未配置 Firebase，网页使用浏览器本地 IndexedDB 保存截图和元数据。"}</p>{!nativeLibrary && (user ? <div className="settings-account"><span className="avatar large">{(user.displayName || user.email || "A").slice(0, 1).toUpperCase()}</span><div><strong>{user.displayName || "Google account"}</strong><span>{user.email}</span></div><span className={`claim-badge ${ownerAllowed ? "ok" : "pending"}`}>{ownerAllowed ? "Owner enabled" : "等待 owner claim"}</span></div> : <button className="button button-primary" onClick={onSignIn}><LogIn size={16} />使用 Google 登录</button>)}</div></section>
+      <section className="settings-card"><div className="settings-card-icon"><Upload size={18} /></div><div><h2>Chrome 扩展</h2><p>{nativeLibrary ? "在 ChatGPT 或 Gemini 的 assistant 回答下方点击 Save to AnswerFrame，确认预览后会直接写入这里；不需要开启 localhost，也不需要终端。" : "在 ChatGPT 或 Gemini assistant 回答下方出现 Save to AnswerFrame。确认预览后，扩展会打开此网页完成导入。"}</p><div className="install-steps"><span>1</span><div>在 Chrome 扩展页开启“开发者模式”，加载构建后的 <code>apps/extension/dist</code> 文件夹。</div><span>2</span><div>{nativeLibrary ? "点击扩展图标即可随时打开此资料库。" : "将 AnswerFrame 地址设置为当前网页地址。"}</div></div></div></section>
+      <section className="settings-card wide"><div className="settings-card-icon"><CircleHelp size={18} /></div><div><h2>开发状态</h2><div className="status-table"><div><span>Native library</span><b className={nativeLibrary ? "ready-dot" : "muted-dot"}>{nativeLibrary ? "Ready" : "Standalone app"}</b></div><div><span>Firebase</span><b className={firebaseReady && !nativeLibrary ? "ready-dot" : "muted-dot"}>{firebaseReady && !nativeLibrary ? "Configured" : nativeLibrary ? "Not used" : "Demo mode"}</b></div><div><span>Link validator</span><b className="muted-dot">Not enabled locally</b></div><div><span>Chrome Web Store</span><b className="muted-dot">Not published</b></div></div></div></section>
+    </div>
+  </>;
 }
 
 type PendingDraft = CaptureDraft & { _metadata?: { title?: string; note?: string; tags?: string[] } };
@@ -422,7 +515,18 @@ function ImportModal({ draft, onCancel, onConfirm }: { draft: PendingDraft; onCa
 
 function ResolvedImage({ path, alt }: { path?: string; alt: string }) {
   const [src, setSrc] = useState(path || "");
-  useEffect(() => { let mounted = true; if (!path) return; void resolveImageUrl(path).then((value) => { if (mounted) setSrc(value); }); return () => { mounted = false; }; }, [path]);
+  useEffect(() => {
+    let mounted = true;
+    let objectUrl = "";
+    setSrc(path || "");
+    if (!path) return () => undefined;
+    void resolveImageUrl(path).then((value) => {
+      if (!mounted) { if (value.startsWith("blob:")) URL.revokeObjectURL(value); return; }
+      objectUrl = value.startsWith("blob:") ? value : "";
+      setSrc(value);
+    }).catch(() => { if (mounted) setSrc(""); });
+    return () => { mounted = false; if (objectUrl) URL.revokeObjectURL(objectUrl); };
+  }, [path]);
   if (!src) return <div className="image-placeholder"><FileText size={26} /><span>截图暂不可用</span></div>;
   return <img src={src} alt={alt} loading="lazy" />;
 }

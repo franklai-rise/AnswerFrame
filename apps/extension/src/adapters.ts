@@ -13,6 +13,7 @@ export interface CaptureAdapter {
   platform: Platform;
   label: string;
   findAnswerRoots(): Element[];
+  findPreviousQuestionRoot(root: Element): Element | undefined;
   findPreviousQuestion(root: Element): string;
   getAnswerText(root: Element): string;
   getTheme(): Theme;
@@ -33,7 +34,12 @@ export const CHATGPT_CANDIDATE_SELECTOR = [
   "[class*='conversation-turn']",
 ].join(", ");
 
-const CHATGPT_MESSAGE_SELECTOR = "[data-message-author-role='user'], [data-message-author-role='assistant']";
+const CHATGPT_MESSAGE_SELECTOR = [
+  "[data-turn='user']",
+  "[data-turn='assistant']",
+  "[data-message-author-role='user']",
+  "[data-message-author-role='assistant']",
+].join(", ");
 
 const GEMINI_EXPLICIT_ANSWER_SELECTOR = [
   "model-response",
@@ -86,6 +92,7 @@ function roleOf(element: Element): string {
   return (
     element.getAttribute("data-message-author-role") ||
     element.getAttribute("data-role") ||
+    element.getAttribute("data-turn") ||
     ""
   ).toLowerCase();
 }
@@ -137,16 +144,25 @@ function hasVisibleStopButton(doc: Document): boolean {
   });
 }
 
-function findPreviousQuestionFromDocument(root: Element, selector: string): string {
+function findPreviousQuestionElementFromDocument(root: Element, selector: string): Element | undefined {
   const messages = Array.from(root.ownerDocument.querySelectorAll(selector));
   const index = messages.findIndex((item) => item === root || item.contains(root) || root.contains(item));
   for (let cursor = index - 1; cursor >= 0; cursor -= 1) {
     const candidate = messages[cursor];
     if (!hasRole(candidate, GEMINI_USER_SELECTOR) && roleOf(candidate) !== "user" && roleOf(candidate) !== "human") continue;
     const text = cleanText(candidate.textContent || "");
-    if (text) return text;
+    if (text) return candidate;
   }
-  return "";
+  return undefined;
+}
+
+function findPreviousQuestionRootFromDocument(root: Element, messageSelector: string, containerSelector: string): Element | undefined {
+  const question = findPreviousQuestionElementFromDocument(root, messageSelector);
+  return question?.closest(containerSelector) || question;
+}
+
+function findPreviousQuestionFromDocument(root: Element, selector: string): string {
+  return cleanText(findPreviousQuestionElementFromDocument(root, selector)?.textContent || "");
 }
 
 function markSurface(links: CapturedLink[], surface: "answer" | "sources-panel"): CapturedLink[] {
@@ -307,6 +323,11 @@ const chatgptAdapter: CaptureAdapter = {
   platform: "chatgpt",
   label: "ChatGPT",
   findAnswerRoots: () => findChatgptAnswerRoots(document),
+  findPreviousQuestionRoot: (root) => findPreviousQuestionRootFromDocument(
+    root,
+    CHATGPT_MESSAGE_SELECTOR,
+    "[data-turn='user'], [data-testid^='conversation-turn'], article, section, [class*='conversation-turn']",
+  ),
   findPreviousQuestion: (root) => findPreviousQuestionFromDocument(root, CHATGPT_MESSAGE_SELECTOR),
   getAnswerText: (root) => textFromContent(root, ".markdown, [class*='markdown']"),
   getTheme: () => themeFromDocument(document),
@@ -326,6 +347,11 @@ const geminiAdapter: CaptureAdapter = {
   platform: "gemini",
   label: "Gemini",
   findAnswerRoots: () => findGeminiAnswerRoots(document),
+  findPreviousQuestionRoot: (root) => findPreviousQuestionRootFromDocument(
+    root,
+    GEMINI_MESSAGE_SELECTOR,
+    "user-query, [data-testid='user-query'], [data-role='user'], [data-message-author-role='user'], [data-message-author-role='human'], article",
+  ),
   findPreviousQuestion: (root) => findPreviousQuestionFromDocument(root, GEMINI_MESSAGE_SELECTOR),
   getAnswerText: (root) => textFromContent(root, "model-response, message-content, response-content, [class*='markdown'], [class*='response']"),
   getTheme: () => themeFromDocument(document),

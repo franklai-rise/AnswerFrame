@@ -31,7 +31,26 @@ export interface ClipRepository {
 
 const STORAGE_KEY = "answerframe.clips.v1";
 const LOCAL_DB_NAME = "answerframe.local.v1";
+const LOCAL_DB_VERSION = 2;
 const LOCAL_STORE_NAME = "clips";
+const LOCAL_IMAGE_STORE_NAME = "imageParts";
+const LOCAL_UPLOAD_STORE_NAME = "uploads";
+const NATIVE_IMAGE_PREFIX = "answerframe-idb://";
+
+interface LocalImagePart {
+  id: string;
+  clipId: string;
+  pageIndex: number;
+  blob: Blob;
+  width: number;
+  height: number;
+  createdAt: number;
+  uploading: boolean;
+}
+
+export function isNativeLibraryPage(): boolean {
+  return typeof window !== "undefined" && window.location.protocol === "chrome-extension:";
+}
 
 function readLocal(): ClipRecord[] {
   try {
@@ -50,10 +69,18 @@ function openLocalDb(): Promise<IDBDatabase> {
   if (localDbPromise) return localDbPromise;
   if (typeof indexedDB === "undefined") return Promise.reject(new Error("当前浏览器不支持本地 IndexedDB"));
   localDbPromise = new Promise((resolve, reject) => {
-    const request = indexedDB.open(LOCAL_DB_NAME, 1);
+    const request = indexedDB.open(LOCAL_DB_NAME, LOCAL_DB_VERSION);
     request.onupgradeneeded = () => {
       const db = request.result;
       if (!db.objectStoreNames.contains(LOCAL_STORE_NAME)) db.createObjectStore(LOCAL_STORE_NAME, { keyPath: "id" });
+      if (!db.objectStoreNames.contains(LOCAL_IMAGE_STORE_NAME)) {
+        const images = db.createObjectStore(LOCAL_IMAGE_STORE_NAME, { keyPath: "id" });
+        images.createIndex("clipId", "clipId", { unique: false });
+      } else {
+        const images = request.transaction?.objectStore(LOCAL_IMAGE_STORE_NAME);
+        if (images && !images.indexNames.contains("clipId")) images.createIndex("clipId", "clipId", { unique: false });
+      }
+      if (!db.objectStoreNames.contains(LOCAL_UPLOAD_STORE_NAME)) db.createObjectStore(LOCAL_UPLOAD_STORE_NAME, { keyPath: "id" });
     };
     request.onsuccess = () => resolve(request.result);
     request.onerror = () => reject(request.error || new Error("无法打开本地收藏库"));
@@ -82,15 +109,55 @@ async function writeLocalDb(record: ClipRecord): Promise<void> {
 
 async function deleteLocalDb(id: string): Promise<void> {
   const db = await openLocalDb();
-  const transaction = db.transaction(LOCAL_STORE_NAME, "readwrite");
-  await idbRequest(transaction.objectStore(LOCAL_STORE_NAME).delete(id));
+  const images = await readLocalImageParts(db, id);
+  const transaction = db.transaction([LOCAL_STORE_NAME, LOCAL_IMAGE_STORE_NAME], "readwrite");
+  transaction.objectStore(LOCAL_STORE_NAME).delete(id);
+  const imageStore = transaction.objectStore(LOCAL_IMAGE_STORE_NAME);
+  for (const image of images) imageStore.delete(image.id);
+  await new Promise<void>((resolve, reject) => {
+    transaction.oncomplete = () => resolve();
+    transaction.onerror = () => reject(transaction.error || new Error("本地收藏库删除失败"));
+    transaction.onabort = () => reject(transaction.error || new Error("本地收藏库删除被取消"));
+  });
+}
+
+async function readLocalImageParts(db: IDBDatabase, clipId: string): Promise<LocalImagePart[]> {
+  const transaction = db.transaction(LOCAL_IMAGE_STORE_NAME, "readonly");
+  const store = transaction.objectStore(LOCAL_IMAGE_STORE_NAME);
+  if (store.indexNames.contains("clipId")) return idbRequest(store.index("clipId").getAll(clipId)) as Promise<LocalImagePart[]>;
+  const all = await idbRequest(store.getAll()) as LocalImagePart[];
+  return all.filter((item) => item.clipId === clipId);
+}
+
+async function deleteLocalImageParts(id: string): Promise<void> {
+  const db = await openLocalDb();
+  const images = await readLocalImageParts(db, id);
+  if (!images.length) return;
+  const transaction = db.transaction(LOCAL_IMAGE_STORE_NAME, "readwrite");
+  const store = transaction.objectStore(LOCAL_IMAGE_STORE_NAME);
+  for (const image of images) store.delete(image.id);
+  await new Promise<void>((resolve, reject) => {
+    transaction.oncomplete = () => resolve();
+    transaction.onerror = () => reject(transaction.error || new Error("本地截图清理失败"));
+    transaction.onabort = () => reject(transaction.error || new Error("本地截图清理被取消"));
+  });
 }
 
 async function ensureLocalData(): Promise<void> {
   if (localSeedPromise) return localSeedPromise;
   localSeedPromise = (async () => {
     const records = await readLocalDb();
-    if (records.length) return;
+    const expiry = Date.now() - 30 * 24 * 60 * 60 * 1000;
+    const expired = records.filter((record) => {
+      if (!record.deletedAt) return false;
+      const deletedAt = typeof record.deletedAt === "string" ? Date.parse(record.deletedAt) : record.deletedAt.seconds * 1000;
+      return Number.isFinite(deletedAt) && deletedAt < expiry;
+    });
+    for (const record of expired) await deleteLocalDb(record.id);
+    if (records.length > expired.length) return;
+    // The extension origin is the real local library.  It must start empty
+    // until a user saves an answer; a demo record there would be misleading.
+    if (isNativeLibraryPage()) return;
     const migrated = readLocal();
     const seed = migrated.length ? migrated : [makeDemoClip()];
     const db = await openLocalDb();
@@ -182,6 +249,7 @@ class LocalClipRepository implements ClipRepository {
       updatedAt: isoNow(),
     };
     await writeLocalDb(records[index]);
+    await deleteLocalImageParts(id).catch(() => undefined);
     return cloneClip(records[index]);
   }
 
@@ -319,12 +387,28 @@ class FirebaseClipRepository implements ClipRepository {
 
 export function createRepository(ownerUid?: string): ClipRepository {
   if (firebaseEnabled && ownerUid && db && storage) return new FirebaseClipRepository(ownerUid);
-  return new LocalClipRepository(ownerUid || "demo-user");
+  return new LocalClipRepository(ownerUid || (isNativeLibraryPage() ? "native-user" : "demo-user"));
+}
+
+async function nativeImageBlob(path: string): Promise<Blob | undefined> {
+  if (!path.startsWith(NATIVE_IMAGE_PREFIX)) return undefined;
+  const relative = path.slice(NATIVE_IMAGE_PREFIX.length);
+  const separator = relative.lastIndexOf("/");
+  if (separator <= 0) return undefined;
+  const clipId = relative.slice(0, separator);
+  const pageIndex = Number(relative.slice(separator + 1));
+  if (!Number.isInteger(pageIndex) || pageIndex < 0) return undefined;
+  const db = await openLocalDb();
+  const transaction = db.transaction(LOCAL_IMAGE_STORE_NAME, "readonly");
+  const image = await idbRequest(transaction.objectStore(LOCAL_IMAGE_STORE_NAME).get(`${clipId}:${pageIndex}`)) as LocalImagePart | undefined;
+  return image?.blob;
 }
 
 export async function resolveImageUrl(path: string): Promise<string> {
   if (!path) return "";
   if (path.startsWith("data:") || path.startsWith("/") || path.startsWith("http://") || path.startsWith("https://")) return path;
+  const blob = await nativeImageBlob(path);
+  if (blob) return URL.createObjectURL(blob);
   if (storage) return getDownloadURL(ref(storage, path));
   return path;
 }

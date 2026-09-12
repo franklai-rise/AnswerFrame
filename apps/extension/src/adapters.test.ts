@@ -36,6 +36,23 @@ describe("provider capture adapters", () => {
     expect(roots).toHaveLength(1);
     expect(roots[0].textContent).toContain("governing equations");
     expect(roots[0].textContent).not.toContain("Explain PINNs");
+    const adapter = getCaptureAdapter({ hostname: "gemini.google.com" } as Location)!;
+    expect(adapter.findPreviousQuestionRoot(roots[0])?.textContent).toContain("Explain PINNs");
+    expect(adapter.findPreviousQuestion(roots[0])).toBe("Explain PINNs in one paragraph.");
+  });
+
+  it("pairs an answer with the nearest preceding question only", () => {
+    const dom = new JSDOM(`<main>
+      <article data-turn="user"><div data-message-author-role="user">Older question</div></article>
+      <article data-turn="assistant"><div class="markdown">Older answer with enough content to be detected.</div></article>
+      <article data-turn="user"><div data-message-author-role="user">Current question</div></article>
+      <article data-turn="assistant"><div class="markdown">Current answer with enough content to be detected.</div></article>
+    </main>`);
+    const roots = findChatgptAnswerRoots(dom.window.document);
+    const adapter = getCaptureAdapter({ hostname: "chatgpt.com" } as Location)!;
+    expect(roots).toHaveLength(2);
+    expect(adapter.findPreviousQuestion(roots[1])).toBe("Current question");
+    expect(adapter.findPreviousQuestionRoot(roots[1])?.getAttribute("data-turn")).toBe("user");
   });
 
   it("keeps the ChatGPT selector regression covered", () => {
@@ -46,6 +63,9 @@ describe("provider capture adapters", () => {
     const roots = findChatgptAnswerRoots(dom.window.document);
     expect(roots).toHaveLength(1);
     expect(roots[0].textContent).toContain("physics residual");
+    const adapter = getCaptureAdapter({ hostname: "chatgpt.com" } as Location)!;
+    expect(adapter.findPreviousQuestionRoot(roots[0])?.textContent).toContain("What is a PINN?");
+    expect(adapter.findPreviousQuestion(roots[0])).toBe("What is a PINN?");
   });
 
   it("finds the current ChatGPT article turn when role is declared on the outer node", () => {

@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { createDraftTransfer, isDraftTransfer } from "./draft-transfer";
+import {
+  createDraftTransfer,
+  createDraftTransferContext,
+  isDraftTransfer,
+  isDraftTransferContext,
+} from "./draft-transfer";
 
 describe("draft transfer", () => {
   it("creates a self-identifying storage payload", () => {
@@ -15,5 +20,12 @@ describe("draft transfer", () => {
     expect(isDraftTransfer(transfer, "draft-other")).toBe(false);
     expect(isDraftTransfer({ id: "draft-test", createdAt: "now", draft: {} })).toBe(false);
     expect(isDraftTransfer(null)).toBe(false);
+  });
+
+  it("keeps only small routing metadata after the page receives the draft", () => {
+    const context = createDraftTransferContext("draft-test", 123);
+    expect(context).toEqual(expect.objectContaining({ id: "draft-test", sourceTabId: 123 }));
+    expect(isDraftTransferContext(context, "draft-test")).toBe(true);
+    expect(isDraftTransferContext({ id: "draft-test", createdAt: Date.now(), sourceTabId: "123" })).toBe(false);
   });
 });

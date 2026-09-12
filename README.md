@@ -14,8 +14,8 @@ flow finishes.
 ## Repository layout
 
 ```text
-apps/web          React + Vite cloud-library UI (Demo mode when Firebase is absent)
-apps/extension    Manifest V3 ChatGPT + Gemini capture client
+apps/web          React + Vite library UI (also bundled as the extension-native library page)
+apps/extension    Manifest V3 ChatGPT + Gemini capture client and local IndexedDB writer
 packages/shared   CaptureDraft/ClipRecord types and link/rail utilities
 functions         Firebase Functions 2nd gen validator and cleanup triggers
 firestore.rules   UID + answerframeOwner protected clip records
@@ -38,25 +38,24 @@ Open `http://localhost:5173/library`. With no `.env` values the app is an
 intentional local Demo mode backed by browser IndexedDB (including long
 screenshots); it is safe to use for visual and interaction work.
 
-### Daily use without two terminals
+### Daily use — no terminal or localhost required
 
-The unpacked extension stays installed in Chrome after it is loaded once. The
-web UI only needs its local HTTP server when the library is opened or a capture
-is imported. After the first production build, install a per-user startup
-shortcut:
+The extension-native library is bundled into `apps/extension/dist`. Once the
+unpacked extension has been loaded, click its toolbar icon to open the library;
+it does **not** require `localhost`, a development server, a startup helper, or
+an open terminal. All saved screenshots and metadata live in the extension
+origin's IndexedDB in the current Chrome profile.
 
-```powershell
-cd AnswerFrame
-npm run build:web
-npm run install:startup
-```
+Chrome deliberately gives pixel-capture access only after an extension action
+click. If a ChatGPT/Gemini answer asks you to click the AnswerFrame toolbar
+icon, click it once: the pending answer resumes automatically. That one action
+arms the current AI tab until it navigates or Chrome restarts; if no answer is
+waiting, the same toolbar icon opens the library.
 
-This starts the local AnswerFrame server silently at Windows sign-in and opens
-the library. When web source files change, run `npm run build:web`; when
-extension files change, run `npm run build:extension`, click Reload on the
-extension card, and refresh already-open ChatGPT/Gemini tabs once. To disable
-the startup helper, delete `AnswerFrame.lnk` from the current user's Startup
-folder.
+`npm run dev`, `npm run build:web`, and the optional startup scripts remain for
+standalone web/Firebase development only. When extension source files change,
+run `npm run build:extension`, click **Reload** on the extension card, and
+refresh already-open ChatGPT/Gemini tabs once.
 
 ## Firebase development project
 
@@ -108,29 +107,39 @@ npm run build:extension
 ```
 
 In Chrome, open `chrome://extensions`, enable Developer mode, and choose
-**Load unpacked** → `apps/extension/dist`. The daily-start helper keeps the
-local web app available at `http://localhost:5173`; no terminal needs to remain
-open. Whenever the extension is rebuilt, click **Reload** on its card and
-refresh each already-open AI tab once. Version 0.2.2 temporarily uses Chrome's
-local unlimited extension storage while handing a screenshot to the library;
-the temporary transfer is removed as soon as the library preview confirms it.
-The extension declares only ChatGPT and Gemini web pages (plus the local
-development bridge), local `storage`/`unlimitedStorage`, `offscreen`, and
-temporary `activeTab` capture access; it does not ask for all-site access,
-cookies, history, or debugger access.
+**Load unpacked** → `apps/extension/dist`. No local server is involved.
+Whenever the extension is rebuilt, click **Reload** on its card and refresh
+each already-open AI tab once. Version 0.3.3 captures the paired user question
+and the complete selected answer, then stores preview-approved screenshot
+pages directly in extension IndexedDB through an acknowledged Port sequence;
+the metadata record is written only after every page has arrived. Interrupted
+uploads have no visible clip record and stale chunks are cleaned up later. The
+popup shows the latest content-free save stage without exposing the captured
+answer, screenshot, question, or URLs.
+
+The extension declares only the ChatGPT and Gemini web origins, local
+`storage`/`unlimitedStorage`, `offscreen`, and temporary `activeTab` capture
+access. It does not ask for all-site access, cookies, history, debugger access,
+or a localhost bridge.
 
 On a ChatGPT or Gemini page, each detected assistant/model answer receives
 **Save to AnswerFrame**. The capture flow temporarily hides controls, captures
-visible segments at least 550 ms apart, crops and stitches them, restores scroll
-and focus in `finally`, then opens an in-page preview. Only after confirmation
-does the extension open the library and forward the draft. After the database
-write completes, the library shows a persistent **保存成功** confirmation with
-the saved title and a direct **查看详情** action; a failed write leaves the
-preview open so it can be retried. The first button visibly changes to
-**正在截取回答…** and errors appear in a fixed toast on the AI page, so a failed
+visible segments at least 550 ms apart, crops them into independent WebP pages,
+restores scroll and focus in `finally`, then opens an in-page preview. Only
+after that one confirmation does the extension save each page and atomically
+create the clip in its own local library. On a newly opened/restarted AI tab,
+Chrome may first ask for one toolbar-icon authorization; that click resumes the
+pending answer automatically. It then opens the native library and the original
+AI tab receives a visible success toast. A failed write leaves the preview open
+and returns a visible error, so it can be retried. The first button visibly changes to
+**正在截取问答…** and errors appear in a fixed toast on the AI page, so a failed
 handoff is no longer silent. Gemini source links
   found in the answer and in its Sources panel are merged and de-duplicated while
   retaining a `sourceSurface` marker.
+
+Click any screenshot in the capture preview or library detail page to open the
+full-screen viewer. It supports mouse-wheel zoom, drag-to-pan, zoom controls,
+double-click reset, page navigation, and `Esc` to close.
 
 ## Deliberate v1 boundaries
 
@@ -139,6 +148,7 @@ handoff is no longer silent. Gemini source links
 - Private account library; no public sharing, teams, OCR, AI summaries, or
   image annotation.
 - No video or paper-body downloads. The screenshot and source metadata are the
-  cloud content source.
+  native local content source; Firebase remains an optional standalone/cloud
+  development path, not the extension's daily save path.
 - The current exact product name is a development name; check trademark,
   Chrome Web Store, and domain availability before public launch.
