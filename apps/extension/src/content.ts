@@ -329,11 +329,11 @@ async function forwardDraftToPage(draft: unknown): Promise<{ ok: boolean; error?
         resolve(value);
       };
       const onAck = (event: MessageEvent) => {
-        if (event.source !== window || event.data?.type !== "answerframe:draft-ack" || event.data.requestId !== requestId) return;
+        if (event.origin !== window.location.origin || event.data?.type !== "answerframe:draft-ack" || event.data.requestId !== requestId) return;
         finish(true);
       };
       window.addEventListener("message", onAck);
-      window.postMessage({ type: "answerframe:draft", draft, requestId }, "*");
+      window.postMessage({ type: "answerframe:draft", draft, requestId }, window.location.origin);
       window.setTimeout(() => finish(false), 250);
     });
     if (delivered) return { ok: true };

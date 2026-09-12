@@ -153,11 +153,11 @@ function App() {
 
   useEffect(() => {
     const onMessage = (event: MessageEvent) => {
-      if (event.source !== window || event.data?.type !== "answerframe:draft") return;
+      if (event.origin !== window.location.origin || event.data?.type !== "answerframe:draft") return;
       const draft = event.data.draft as CaptureDraft & { _metadata?: { title?: string; note?: string; tags?: string[] } };
       if ((draft?.platform === "chatgpt" || draft?.platform === "gemini") && Array.isArray(draft.screenshotParts)) {
         setImportDraft(draft);
-        if (event.data?.requestId) window.postMessage({ type: "answerframe:draft-ack", requestId: event.data.requestId }, "*");
+        if (event.data?.requestId) window.postMessage({ type: "answerframe:draft-ack", requestId: event.data.requestId }, window.location.origin);
       }
     };
     window.addEventListener("message", onMessage);

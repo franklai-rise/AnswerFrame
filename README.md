@@ -111,7 +111,7 @@ In Chrome, open `chrome://extensions`, enable Developer mode, and choose
 **Load unpacked** → `apps/extension/dist`. The daily-start helper keeps the
 local web app available at `http://localhost:5173`; no terminal needs to remain
 open. Whenever the extension is rebuilt, click **Reload** on its card and
-refresh each already-open AI tab once. Version 0.2.1 temporarily uses Chrome's
+refresh each already-open AI tab once. Version 0.2.2 temporarily uses Chrome's
 local unlimited extension storage while handing a screenshot to the library;
 the temporary transfer is removed as soon as the library preview confirms it.
 The extension declares only ChatGPT and Gemini web pages (plus the local
